@@ -826,25 +826,17 @@ class Config:
         self.verbose = verbose
 
 
-def _read_mysqlmig_group(option_file_args):
-    """Read the [mysqlmig] option group using my_print_defaults.
+def _read_option_group(group_name, option_file_args):
+    """Read a named option group via my_print_defaults into a dict.
 
     my_print_defaults resolves the same option files the mysql client reads
-    (honoring --defaults-file / --defaults-extra-file) and prints a named
-    group's settings as `--key=value` lines. mysqlmig only needs db/dir/
-    login-path, so this is kept best-effort and tolerant: if the tool is
-    unavailable or fails, an empty dict is returned and mysqlmig falls back to
-    CLI values and defaults.
-
-    Returns a dict possibly containing 'db', 'dir', 'login-path'.
+    (honoring --defaults-file / --defaults-extra-file) and prints a group's
+    settings as `--key=value` lines. Best-effort and tolerant: if the tool is
+    unavailable or fails, an empty dict is returned.
     """
-    # my_print_defaults is the standard tool to dump a named option group.
     if shutil.which("my_print_defaults") is None:
         return {}
-    cmd = ["my_print_defaults"]
-    # my_print_defaults understands the same option-file flags.
-    cmd += option_file_args
-    cmd.append("mysqlmig")
+    cmd = ["my_print_defaults"] + list(option_file_args) + [group_name]
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
@@ -864,6 +856,66 @@ def _read_mysqlmig_group(option_file_args):
             key, value = body, ""
         result[key.strip()] = value.strip()
     return result
+
+
+def _read_mysqlmig_group(option_file_args):
+    """Read the [mysqlmig] option group (db / dir / login-path)."""
+    return _read_option_group("mysqlmig", option_file_args)
+
+
+def _host_from_print_defaults(option_file_args, mysql_path="mysql"):
+    """Return the host the mysql client would use, from `mysql --print-defaults`.
+
+    `--print-defaults` must be the first argument, so any --defaults-file /
+    --defaults-extra-file flags are placed before it. The command prints the
+    effective options as a single `--key=value ...` line; we scan it for the
+    last `--host=` (later options win in the client). Returns None if no host
+    is configured or the command cannot be run.
+    """
+    if shutil.which(mysql_path) is None:
+        return None
+    # Option-file flags must precede --print-defaults.
+    cmd = [mysql_path] + list(option_file_args) + ["--print-defaults"]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+
+    host = None
+    for token in proc.stdout.split():
+        if token.startswith("--host="):
+            host = token[len("--host="):]
+    return host or None
+
+
+def resolve_display_host(connection):
+    """Describe the host mysqlmig connects to, for display.
+
+    Reflects the *configured* host (what the DBA actually used), never the
+    server's own @@hostname (which, e.g. behind an Aurora endpoint, is a
+    meaningless instance identifier).
+
+    Priority:
+      1. An explicit --host on the ConnectionConfig.
+      2. The host resolved from the mysql client's option files via
+         `mysql --print-defaults` (honoring --defaults-file / extra-file).
+      3. 'localhost' when no host is configured (the mysql client's default).
+    """
+    if connection.host:
+        return connection.host
+
+    option_file_args = []
+    if connection.defaults_file is not None:
+        option_file_args.append("--defaults-file=" + connection.defaults_file)
+    if connection.defaults_extra_file is not None:
+        option_file_args.append(
+            "--defaults-extra-file=" + connection.defaults_extra_file)
+
+    host = _host_from_print_defaults(option_file_args)
+    return host if host else "localhost"
 
 
 # Top-level folder that holds per-database migration subfolders.
@@ -886,6 +938,111 @@ def resolve_directory(explicit_dir, database, db_from_cli):
     if db_from_cli:
         return os.path.join(MIGRATIONS_BASE, database)
     return MIGRATIONS_BASE
+
+
+# ---------------------------------------------------------------------------
+# Color output
+# ---------------------------------------------------------------------------
+
+class Color:
+    """Minimal ANSI color helper.
+
+    Coloring is enabled only when stdout is a TTY and the NO_COLOR environment
+    variable is unset (https://no-color.org/). When disabled, every wrapper is
+    a no-op returning the plain text, so callers can colorize unconditionally.
+
+    The enabled state is computed once at construction but can be overridden
+    (e.g. in tests) via enabled=.
+    """
+
+    _CODES = {
+        "reset": "\033[0m",
+        "bold": "\033[1m",
+        "red": "\033[31m",
+        "green": "\033[32m",
+        "yellow": "\033[33m",
+        "blue": "\033[34m",
+        "magenta": "\033[35m",
+        "cyan": "\033[36m",
+        "white": "\033[37m",
+        "bright_blue": "\033[94m",
+    }
+
+    def __init__(self, enabled=None):
+        if enabled is None:
+            enabled = self._auto_enabled()
+        self.enabled = enabled
+
+    @staticmethod
+    def _auto_enabled():
+        import sys
+        if os.environ.get("NO_COLOR") is not None:
+            return False
+        stream = sys.stdout
+        try:
+            return bool(stream.isatty())
+        except (AttributeError, ValueError):
+            return False
+
+    def _wrap(self, text, *names):
+        if not self.enabled:
+            return text
+        prefix = "".join(self._CODES[n] for n in names)
+        return prefix + text + self._CODES["reset"]
+
+    # Column palette. Each logical column has ONE color used everywhere it
+    # appears (status, history, run, dry-run), so columns read consistently
+    # across the whole app:
+    #   version  -> cyan
+    #   script   -> bright blue   (also used for the pending list in status)
+    #   status   -> by meaning (SUCCESS green / FAILED red / IN_PROGRESS yellow)
+    def version(self, text):
+        return self._wrap(str(text), "cyan")
+
+    def database(self, text):
+        return self._wrap(str(text), "bold", "white")
+
+    def script(self, text):
+        return self._wrap(str(text), "bright_blue")
+
+    # Alias: pending migrations are shown by script name, same color as the
+    # SCRIPT column.
+    def pending(self, text):
+        return self.script(text)
+
+    def success(self, text):
+        return self._wrap(str(text), "green")
+
+    def failure(self, text):
+        return self._wrap(str(text), "red")
+
+    def warning(self, text):
+        return self._wrap(str(text), "yellow")
+
+    def heading(self, text):
+        return self._wrap(str(text), "bold")
+
+    def status(self, status_value, text=None):
+        """Color a status by its meaning.
+
+        status_value selects the color; text is what gets colored (defaults to
+        status_value). Passing a pre-padded text lets callers keep column
+        alignment while still coloring the whole cell.
+        """
+        if text is None:
+            text = status_value
+        if status_value == STATUS_SUCCESS:
+            return self.success(text)
+        if status_value == STATUS_FAILED:
+            return self.failure(text)
+        if status_value == STATUS_IN_PROGRESS:
+            return self.warning(text)
+        return text
+
+
+# Module-level instance used by the output paths. Recomputed in main() so the
+# TTY/NO_COLOR decision reflects the real runtime environment.
+COLOR = Color()
 
 
 # ---------------------------------------------------------------------------
@@ -954,10 +1111,12 @@ class Runner:
         target = state.resolve_target(self.config.target)
         pending = state.pending(self.config.target)
 
-        _print("Database: {}".format(self.config.database))
-        _print("Current:  {}".format(current if current else "(none)"))
-        _print("Target:   {}".format(target))
-        _print("Latest:   {}".format(latest if latest else "(none)"))
+        _print("Database: {}".format(COLOR.database(self.config.database)))
+        _print("Current:  {}".format(
+            COLOR.version(current) if current else "(none)"))
+        _print("Target:   {}".format(COLOR.version(target)))
+        _print("Latest:   {}".format(
+            COLOR.version(latest) if latest else "(none)"))
         _print()
 
         if blocking is not None:
@@ -965,7 +1124,8 @@ class Runner:
             # the first thing a run must resolve, so it is excluded from the
             # plain "pending" list below to avoid listing it twice.
             _print("Blocking migration: {} ({})".format(
-                blocking.version, blocking.status))
+                COLOR.version(blocking.version),
+                COLOR.status(blocking.status)))
             _print()
             remaining = [m for m in pending
                          if m.version != blocking.version]
@@ -973,13 +1133,13 @@ class Runner:
                 _print("Blocked migrations (cannot run until the blocking "
                        "migration succeeds):")
                 for migration in remaining:
-                    _print("  {}".format(migration.filename))
+                    _print("  {}".format(COLOR.pending(migration.filename)))
             return 0
 
         if pending:
             _print("Pending migrations:")
             for migration in pending:
-                _print("  {}".format(migration.filename))
+                _print("  {}".format(COLOR.pending(migration.filename)))
         else:
             _print("No pending migrations.")
         return 0
@@ -992,15 +1152,20 @@ class Runner:
         if not records:
             _print("No migrations recorded.")
             return 0
-        header = "{:<4} {:<10} {:<28} {:<12} {:<23} {}".format(
+        header = "{:<4} {:<10} {:<28} {:<12} {:<26} {}".format(
             "ID", "VERSION", "SCRIPT", "STATUS", "EXECUTION START", "TIME")
-        _print(header)
+        _print(COLOR.heading(header))
         for r in records:
-            _print("{:<4} {:<10} {:<28} {:<12} {:<23} {}".format(
+            # Pad each cell to its column width BEFORE coloring, so the ANSI
+            # escape sequences do not throw off column alignment.
+            version_cell = COLOR.version("{:<10}".format(str(r.version)))
+            script_cell = COLOR.script("{:<28}".format(r.script_name))
+            status_cell = COLOR.status(r.status, "{:<12}".format(r.status))
+            _print("{:<4} {} {} {} {:<26} {}".format(
                 r.id,
-                str(r.version),
-                r.script_name,
-                r.status,
+                version_cell,
+                script_cell,
+                status_cell,
                 r.execution_start,
                 r.execution_time if r.execution_time else "-",
             ))
@@ -1038,8 +1203,9 @@ class Runner:
 
         if not pending:
             current = state.current_version()
-            _print("Current: {}".format(current if current else "(none)"))
-            _print("Target:  {}".format(target))
+            _print("Current: {}".format(
+                COLOR.version(current) if current else "(none)"))
+            _print("Target:  {}".format(COLOR.version(target)))
             _print()
             _print("No pending migrations.")
             return 0
@@ -1052,8 +1218,8 @@ class Runner:
                 return 1
 
         _print()
-        _print("Migration complete.")
-        _print("Current version: {}".format(pending[-1].version))
+        _print(COLOR.success("Migration complete."))
+        _print("Current version: {}".format(COLOR.version(pending[-1].version)))
         return 0
 
     def _handle_blocking(self, blocking, state):
@@ -1075,13 +1241,14 @@ class Runner:
             )
 
         if blocking.status == STATUS_FAILED:
-            _print("Previous migration failed:")
+            _print(COLOR.warning("Previous migration failed:"))
         else:
-            _print("Previous migration did not finish:")
+            _print(COLOR.warning("Previous migration did not finish:"))
         _print()
         _print("  {}".format(migration.filename))
         _print()
-        _print("The migration may have partially changed the database.")
+        _print(COLOR.warning(
+            "The migration may have partially changed the database."))
         _print()
         if not self._confirm("Retry this migration? [y/N]: "):
             _print("Aborted.")
@@ -1113,26 +1280,27 @@ class Runner:
             _print()
 
         if result.ok:
-            _print("  SUCCESS")
+            _print("  {}".format(COLOR.success("SUCCESS")))
             return True
 
-        _print("  FAILED")
+        _print("  {}".format(COLOR.failure("FAILED")))
         _print()
-        _eprint("Migration failed: {}".format(migration.filename))
+        _eprint(COLOR.failure("Migration failed: {}".format(migration.filename)))
         if not self.config.verbose:
             _eprint(result.output.rstrip("\n"))
         return False
 
     def _show_dry_run(self, state, pending, target):
         current = state.current_version()
-        _print("Current: {}".format(current if current else "(none)"))
-        _print("Target:  {}".format(target))
+        _print("Current: {}".format(
+            COLOR.version(current) if current else "(none)"))
+        _print("Target:  {}".format(COLOR.version(target)))
         _print()
         _print("Pending migrations:")
         for migration in pending:
-            _print("  {}".format(migration.filename))
+            _print("  {}".format(COLOR.pending(migration.filename)))
         _print()
-        _print("Dry run: no migrations executed.")
+        _print(COLOR.warning("Dry run: no migrations executed."))
         return 0
 
 
@@ -1158,10 +1326,13 @@ def _read_migration_sql(path):
 HELP_TEXT = """\
 mysqlmig - simple MySQL schema migration executor
 
-Commands (non-interactive):
-  mysqlmig status            Show current migration state
-  mysqlmig history           Show migration history
-  mysqlmig run [options]     Execute pending migrations
+Usage:
+  mysqlmig [COMMAND] [OPTIONS]
+
+Commands:
+  status                     Show current migration state
+  history                    Show migration history
+  run                        Execute pending migrations
 
 Run options:
   -t, --to VERSION|latest    Target version (default: latest)
@@ -1175,13 +1346,66 @@ Global options:
   -P, --port PORT            MySQL port
   -u, --user USER            MySQL user
   -L, --login-path NAME      MySQL login path
-      --defaults-file=FILE
-      --defaults-extra-file=FILE
       --help                 Show this help
       --version              Show version
+      --defaults-file=FILE
+                             Read only this MySQL option file
+      --defaults-extra-file=FILE
+                             Read this option file in addition to the defaults
 
-Running mysqlmig with no command opens this interactive menu.\
+Options may be given before or after the command.
+Running mysqlmig with no command opens the interactive menu.\
 """
+
+_HELP_COMMANDS = ("status", "history", "run")
+
+
+def render_help():
+    """Return HELP_TEXT with colorization (via COLOR).
+
+    Coloring mirrors the look of a modern argparse help, but is applied by us
+    so it is identical on every supported Python version:
+      * section headings (lines ending with ':')  -> bold
+      * option flags (-x / --long)                 -> cyan
+      * value placeholders / metavars (UPPERCASE)  -> yellow
+      * command names                              -> green
+    When color is disabled, every wrapper is a no-op, so the text is plain.
+    """
+    out = []
+    for line in HELP_TEXT.split("\n"):
+        stripped = line.rstrip()
+        if stripped and not line.startswith(" ") and stripped.endswith(":"):
+            out.append(COLOR.heading(stripped))
+        elif line.startswith("  "):
+            out.append(_colorize_help_line(line))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _colorize_help_line(line):
+    """Colorize an indented help line (command or option entry)."""
+    import re
+
+    # Command entries: "  status   Show ..." -> color the command name green.
+    stripped = line.strip()
+    first = stripped.split(" ", 1)[0]
+    if first in _HELP_COMMANDS:
+        return line.replace(first, COLOR.success(first), 1)
+
+    # Option entries: color flags (cyan) and UPPERCASE metavars (yellow).
+    def color_flag(match):
+        return COLOR.version(match.group(0))
+
+    def color_metavar(match):
+        return COLOR.warning(match.group(0))
+
+    # Flags: -X or --long-name (optionally followed by =).
+    line = re.sub(r"--?[A-Za-z][\w-]*", color_flag, line)
+    # Metavars: an UPPERCASE token, optionally followed by alternatives like
+    # "|latest" (so "VERSION|latest" is colored as one unit).
+    line = re.sub(r"\b[A-Z]{2,}(?:\|[A-Za-z]+)?", color_metavar, line)
+    return line
 
 
 class InteractiveMenu:
@@ -1199,9 +1423,18 @@ class InteractiveMenu:
         self._output = output_fn or (lambda msg="": _print(msg))
 
     def _header(self):
-        self._output("MySQL Migration Tool v{}".format(__version__))
+        self._output(COLOR.heading(
+            "MySQL Migration Tool v{}".format(__version__)))
         self._output()
-        self._output("Database: {}".format(self.config.database))
+        host = self._display_host()
+        if host:
+            self._output("Host:     {}".format(host))
+        self._output("Database: {}".format(COLOR.database(self.config.database)))
+
+    def _display_host(self):
+        """The configured host for the header (CLI --host, option files, or
+        'localhost'). Never the server's @@hostname."""
+        return resolve_display_host(self.config.connection)
 
     def _menu(self):
         self._output()
@@ -1230,14 +1463,70 @@ class InteractiveMenu:
             elif choice == "2":
                 self._safe(self.runner.history)
             elif choice == "3":
-                self._safe(self.runner.run)
+                self._safe(self._run_with_prompt)
             elif choice == "4":
                 self._output()
-                self._output(HELP_TEXT)
+                self._output(render_help())
+                self._separator()
             elif choice == "5" or choice.lower() in ("exit", "quit", "q"):
                 return 0
             else:
                 self._output("Invalid choice: {!r}".format(choice))
+
+    def _separator(self):
+        """Visual divider shown between command output and the next menu."""
+        self._output()
+        self._output(COLOR.heading("-" * 60))
+
+    def _run_with_prompt(self):
+        """Show the current state and pending migrations, then run.
+
+        Seeing current/latest/pending first lets the DBA choose a target
+        without remembering the available versions. The target prompt is
+        skipped when there is nothing to choose: no pending migrations, or an
+        empty repository.
+        """
+        if self.runner.metadata.exists():
+            # Initialized: show full status, then decide based on pending.
+            self.runner.status()
+            self._output()
+            state = self.runner._load_state()
+            pending = state.pending(LATEST)
+            if not pending:
+                # Already at the latest version; status() above already
+                # reported "No pending migrations", so just return without
+                # prompting or running.
+                return
+        else:
+            # Fresh database: no table yet, so list the repo migrations (all of
+            # which are pending) and note that running will create the table.
+            self._output("{} does not exist in database '{}' yet; "
+                         "running will create it.".format(
+                             METADATA_TABLE, self.config.database))
+            self._output()
+            migrations = discover_migrations(self.config.directory)
+            if not migrations:
+                self._output("No migrations found in '{}'.".format(
+                    self.config.directory))
+                return
+            self._output("Pending migrations:")
+            for migration in migrations:
+                self._output("  {}".format(COLOR.pending(migration.filename)))
+            self._output()
+
+        try:
+            answer = self._input("Target version [latest]: ").strip()
+        except EOFError:
+            answer = ""
+        # Blank or 'latest' means the latest available migration.
+        target = answer if answer else LATEST
+        # Apply the chosen target for this run only.
+        previous = self.config.target
+        self.config.target = target
+        try:
+            self.runner.run()
+        finally:
+            self.config.target = previous
 
     def _safe(self, action):
         """Run a command action, reporting mysqlmig errors without exiting."""
@@ -1245,7 +1534,8 @@ class InteractiveMenu:
         try:
             action()
         except MysqlmigError as exc:
-            self._output("ERROR: {}".format(exc))
+            self._output(COLOR.failure("ERROR: {}".format(exc)))
+        self._separator()
 
 
 # ---------------------------------------------------------------------------
@@ -1253,44 +1543,81 @@ class InteractiveMenu:
 # ---------------------------------------------------------------------------
 
 import argparse
+import inspect
 import sys
 
 
 _COMMANDS = ("status", "history", "run")
 
 
-# -h is mapped to --host to match the mysql client convention, so the parser is
-# built with add_help=False and --help is added explicitly (no -h help alias).
+def _add_global_options(parser):
+    """Add the global connection/selection options to a parser.
+
+    Defaults are SUPPRESS so that, when these options also live on a subparser,
+    an unspecified copy does not overwrite a value given before the command.
+    -h maps to --host to match the mysql client convention.
+    """
+    parser.add_argument("-D", "--db", dest="db", metavar="DATABASE",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("--dir", dest="dir", metavar="DIRECTORY",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("-h", "--host", dest="host", metavar="HOST",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("-P", "--port", dest="port", metavar="PORT",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("-u", "--user", dest="user", metavar="USER",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("-L", "--login-path", dest="login_path",
+                        metavar="NAME", default=argparse.SUPPRESS)
+    parser.add_argument("--defaults-file", dest="defaults_file",
+                        metavar="FILE", default=argparse.SUPPRESS)
+    parser.add_argument("--defaults-extra-file", dest="defaults_extra_file",
+                        metavar="FILE", default=argparse.SUPPRESS)
+
+
+def _add_run_options(parser):
+    """Add the run-only options to a parser (also SUPPRESS defaults)."""
+    parser.add_argument("-t", "--to", dest="to", metavar="VERSION|latest",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("-v", "--verbose", dest="verbose", action="store_true",
+                        default=argparse.SUPPRESS)
+
+
+# --help and --version are handled in main() before argparse so help can be
+# colored consistently across Python versions. The parser is built with
+# add_help=False; -h maps to --host, not help.
 def build_parser():
-    parser = argparse.ArgumentParser(
+    parser_kwargs = dict(
         prog="mysqlmig",
         description="Simple, deterministic MySQL schema migration executor.",
         add_help=False,
     )
-    parser.add_argument("--help", action="help",
-                        help="Show this help message and exit")
-    parser.add_argument("--version", action="version",
-                        version="mysqlmig {}".format(__version__))
+    # argparse gained automatic help coloring in Python 3.14; disable it since
+    # we render help ourselves. The `color` keyword is absent before 3.14.
+    if "color" in inspect.signature(argparse.ArgumentParser).parameters:
+        parser_kwargs["color"] = False
+    parser = argparse.ArgumentParser(**parser_kwargs)
 
-    parser.add_argument("-D", "--db", dest="db", metavar="DATABASE")
-    parser.add_argument("--dir", dest="dir", metavar="DIRECTORY")
-    parser.add_argument("-h", "--host", dest="host", metavar="HOST")
-    parser.add_argument("-P", "--port", dest="port", metavar="PORT")
-    parser.add_argument("-u", "--user", dest="user", metavar="USER")
-    parser.add_argument("-L", "--login-path", dest="login_path", metavar="NAME")
-    parser.add_argument("--defaults-file", dest="defaults_file", metavar="FILE")
-    parser.add_argument("--defaults-extra-file", dest="defaults_extra_file",
-                        metavar="FILE")
+    # Globals + run options are also placed on the subparsers (via a shared
+    # parent) so they may appear either before or after the command.
+    _add_global_options(parser)
+    _add_run_options(parser)
 
+    global_parent = argparse.ArgumentParser(add_help=False)
+    _add_global_options(global_parent)
+
+    # add_help=False on subparsers because -h is --host, not help; help is
+    # handled in main() via render_help().
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("status", help="Show current migration state", add_help=True)
-    sub.add_parser("history", help="Show migration history", add_help=True)
-    run_parser = sub.add_parser("run", help="Execute pending migrations",
-                                add_help=True)
-    run_parser.add_argument("-t", "--to", dest="to", metavar="VERSION|latest")
-    run_parser.add_argument("--dry-run", dest="dry_run", action="store_true")
-    run_parser.add_argument("-v", "--verbose", dest="verbose",
-                            action="store_true")
+    sub.add_parser("status", parents=[global_parent], add_help=False,
+                   help="Show current migration state")
+    sub.add_parser("history", parents=[global_parent], add_help=False,
+                   help="Show migration history")
+    run_parser = sub.add_parser("run", parents=[global_parent], add_help=False,
+                                help="Execute pending migrations")
+    _add_run_options(run_parser)
 
     return parser
 
@@ -1306,32 +1633,43 @@ def _resolve_config(args, group_reader=None):
     if group_reader is None:
         group_reader = _read_mysqlmig_group
 
+    # Options use SUPPRESS defaults, so an unspecified option may be absent
+    # from the namespace entirely; read everything through getattr.
+    cli_db = getattr(args, "db", None)
+    cli_dir = getattr(args, "dir", None)
+    cli_host = getattr(args, "host", None)
+    cli_port = getattr(args, "port", None)
+    cli_user = getattr(args, "user", None)
+    cli_login_path = getattr(args, "login_path", None)
+    cli_defaults_file = getattr(args, "defaults_file", None)
+    cli_defaults_extra_file = getattr(args, "defaults_extra_file", None)
+
     option_file_args = []
-    if args.defaults_file is not None:
-        option_file_args.append("--defaults-file=" + args.defaults_file)
-    if args.defaults_extra_file is not None:
-        option_file_args.append("--defaults-extra-file=" + args.defaults_extra_file)
+    if cli_defaults_file is not None:
+        option_file_args.append("--defaults-file=" + cli_defaults_file)
+    if cli_defaults_extra_file is not None:
+        option_file_args.append("--defaults-extra-file=" + cli_defaults_extra_file)
 
     group = group_reader(option_file_args)
 
-    db_from_cli = args.db is not None
-    database = args.db or group.get("db")
+    db_from_cli = cli_db is not None
+    database = cli_db or group.get("db")
     if not database:
         raise MysqlmigError(
             "No target database specified. Use --db or set db in [mysqlmig]."
         )
 
-    explicit_dir = args.dir or group.get("dir")
+    explicit_dir = cli_dir or group.get("dir")
     directory = resolve_directory(explicit_dir, database, db_from_cli)
 
-    login_path = args.login_path or group.get("login-path")
+    login_path = cli_login_path or group.get("login-path")
 
     connection = ConnectionConfig(
-        defaults_file=args.defaults_file,
-        defaults_extra_file=args.defaults_extra_file,
-        host=args.host,
-        port=args.port,
-        user=args.user,
+        defaults_file=cli_defaults_file,
+        defaults_extra_file=cli_defaults_extra_file,
+        host=cli_host,
+        port=cli_port,
+        user=cli_user,
         login_path=login_path,
         database=database,
     )
@@ -1350,6 +1688,20 @@ def main(argv=None):
     """Entry point. Returns an exit code (0 success, 1 error)."""
     if argv is None:
         argv = sys.argv[1:]
+
+    # Recompute color enablement against the real runtime stdout/environment
+    # (the module-level instance was built at import time).
+    global COLOR
+    COLOR = Color()
+
+    # Handle --help / --version ourselves so help is colored consistently
+    # across Python versions (argparse only colors on 3.14+).
+    if "--help" in argv:
+        _print(render_help())
+        return 0
+    if "--version" in argv:
+        _print("mysqlmig {}".format(__version__))
+        return 0
 
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1372,7 +1724,7 @@ def main(argv=None):
         _eprint("Unknown command: {}".format(args.command))
         return 1
     except MysqlmigError as exc:
-        _eprint("ERROR: {}".format(exc))
+        _eprint(COLOR.failure("ERROR: {}".format(exc)))
         return 1
 
 
