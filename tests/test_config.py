@@ -1,8 +1,8 @@
 """Unit tests for configuration resolution (CLI + [mysqlmig] + defaults)."""
 
-import pytest
-
 import os
+
+import pytest
 
 from mysqlmig import MysqlmigError, _resolve_config
 
@@ -11,11 +11,11 @@ class Args:
     """Minimal stand-in for parsed argparse args."""
 
     def __init__(self, **kw):
-        defaults = dict(
-            db=None, dir=None, host=None, port=None, user=None,
-            login_path=None, defaults_file=None, defaults_extra_file=None,
-            to=None, dry_run=False, verbose=False,
-        )
+        defaults = {
+            "db": None, "dir": None, "host": None, "port": None, "user": None,
+            "login_path": None, "defaults_file": None, "defaults_extra_file": None,
+            "to": None, "dry_run": False, "verbose": False,
+        }
         defaults.update(kw)
         for key, value in defaults.items():
             setattr(self, key, value)

@@ -2,12 +2,11 @@
 
 import mysqlmig
 from mysqlmig import (
-    Color,
     STATUS_FAILED,
     STATUS_IN_PROGRESS,
     STATUS_SUCCESS,
+    Color,
 )
-
 
 RESET = "\033[0m"
 

@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """mysqlmig - a simple, deterministic MySQL schema migration executor for DBAs.
 
-Single-file tool, Python 3.8+, standard library only. SQL execution is delegated
-to the existing `mysql` command-line client. See DESIGN.md for the full design.
+Single-file tool, Python 3.12+, standard library only. SQL execution is
+delegated to the existing `mysql` command-line client. See DESIGN.md for the
+full design.
 """
 
+import argparse
 import os
 import re
 import shutil
 import subprocess
+import sys
 
 __version__ = "0.1.0"
 
@@ -67,7 +70,7 @@ class Version:
         match = _VERSION_RE.match(raw)
         if not match:
             raise MigrationFormatError(
-                "Invalid version: {!r}".format(raw)
+                f"Invalid version: {raw!r}"
             )
         self.raw = raw
         self.has_prefix = match.group("prefix") == "v"
@@ -107,7 +110,7 @@ class Version:
         return self == other or self > other
 
     def __repr__(self):
-        return "Version({!r})".format(self.raw)
+        return f"Version({self.raw!r})"
 
     def __str__(self):
         return self.raw
@@ -129,7 +132,7 @@ class Migration:
         self.path = path
 
     def __repr__(self):
-        return "Migration({!r})".format(self.filename)
+        return f"Migration({self.filename!r})"
 
 
 def parse_migration_filename(filename, path=None):
@@ -161,7 +164,7 @@ def discover_migrations(directory):
     """
     if not os.path.isdir(directory):
         raise MigrationDiscoveryError(
-            "Migration directory {!r} does not exist.".format(directory)
+            f"Migration directory {directory!r} does not exist."
         )
 
     migrations = []
@@ -188,10 +191,8 @@ def _check_duplicate_versions(migrations):
         key = migration.version.components
         if key in seen:
             raise MigrationDiscoveryError(
-                "Duplicate migration version {}: {!r} and {!r} resolve to the "
-                "same version.".format(
-                    migration.version, seen[key].filename, migration.filename
-                )
+                f"Duplicate migration version {migration.version}: {seen[key].filename!r} and {migration.filename!r} resolve to the "
+                "same version."
             )
         seen[key] = migration
 
@@ -206,10 +207,8 @@ def _check_prefix_convention(migrations):
         if migration.version.has_prefix != expected_prefix:
             style = "with the 'v' prefix" if expected_prefix else "without the 'v' prefix"
             raise MigrationDiscoveryError(
-                "Inconsistent version prefix: {!r} does not match the "
-                "convention established by the first migration ({}).".format(
-                    migration.filename, style
-                )
+                f"Inconsistent version prefix: {migration.filename!r} does not match the "
+                f"convention established by the first migration ({style})."
             )
 
 
@@ -321,9 +320,7 @@ class MysqlClient:
     def _require_client(self):
         if shutil.which(self.mysql_path) is None:
             raise MysqlClientError(
-                "The '{}' command-line client was not found on PATH.".format(
-                    self.mysql_path
-                )
+                f"The '{self.mysql_path}' command-line client was not found on PATH."
             )
 
     def _migration_command(self):
@@ -376,8 +373,7 @@ class MysqlClient:
         proc = subprocess.run(
             self._metadata_command(["--batch"]),
             input=sql_text,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
         if proc.returncode != 0:
@@ -398,8 +394,7 @@ class MysqlClient:
         proc = subprocess.run(
             self._metadata_command(["--batch", "--skip-column-names"]),
             input=sql_text,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
         if proc.returncode != 0:
@@ -514,7 +509,7 @@ class Metadata:
         rows = self.client.query(
             "SELECT COUNT(*) FROM information_schema.tables "
             "WHERE table_schema = DATABASE() "
-            "AND table_name = '{}';".format(METADATA_TABLE)
+            f"AND table_name = '{METADATA_TABLE}';"
         )
         return bool(rows) and rows[0][0] != "0"
 
@@ -537,9 +532,7 @@ class Metadata:
     def get_log(self, version):
         """Return the current execution_log for a version, or None."""
         rows = self.client.query(
-            "SELECT execution_log FROM schema_version WHERE version = {};".format(
-                _sql_quote(version)
-            )
+            f"SELECT execution_log FROM schema_version WHERE version = {_sql_quote(version)};"
         )
         if not rows:
             return None
@@ -556,9 +549,7 @@ class Metadata:
         """
         self.client.execute(
             "INSERT INTO schema_version (version, script_name, status) "
-            "VALUES ({}, {}, '{}');".format(
-                _sql_quote(version), _sql_quote(script_name), STATUS_IN_PROGRESS
-            )
+            f"VALUES ({_sql_quote(version)}, {_sql_quote(script_name)}, '{STATUS_IN_PROGRESS}');"
         )
 
     def reset_in_progress(self, version, script_name):
@@ -569,13 +560,11 @@ class Metadata:
         """
         self.client.execute(
             "UPDATE schema_version SET "
-            "status = '{}', "
-            "script_name = {}, "
+            f"status = '{STATUS_IN_PROGRESS}', "
+            f"script_name = {_sql_quote(script_name)}, "
             "execution_start = CURRENT_TIMESTAMP(3), "
             "execution_time = NULL "
-            "WHERE version = {};".format(
-                STATUS_IN_PROGRESS, _sql_quote(script_name), _sql_quote(version)
-            )
+            f"WHERE version = {_sql_quote(version)};"
         )
 
     def finalize(self, version, status, log_text, append=False):
@@ -588,23 +577,16 @@ class Metadata:
             raise ValueError("finalize status must be SUCCESS or FAILED")
 
         if append:
-            log_expr = "CONCAT(COALESCE(execution_log, ''), {})".format(
-                _sql_quote(log_text)
-            )
+            log_expr = f"CONCAT(COALESCE(execution_log, ''), {_sql_quote(log_text)})"
         else:
             log_expr = _sql_quote(log_text)
 
         self.client.execute(
             "UPDATE schema_version SET "
-            "status = '{status}', "
-            "execution_log = {log_expr}, "
-            "execution_time = {time_expr} "
-            "WHERE version = {version};".format(
-                status=status,
-                log_expr=log_expr,
-                time_expr=_EXECUTION_TIME_EXPR,
-                version=_sql_quote(version),
-            )
+            f"status = '{status}', "
+            f"execution_log = {log_expr}, "
+            f"execution_time = {_EXECUTION_TIME_EXPR} "
+            f"WHERE version = {_sql_quote(version)};"
         )
 
 
@@ -649,7 +631,7 @@ class MigrationRecord:
         return self.status != STATUS_SUCCESS
 
     def __repr__(self):
-        return "MigrationRecord({} {})".format(self.version, self.status)
+        return f"MigrationRecord({self.version} {self.status})"
 
 
 # ---------------------------------------------------------------------------
@@ -698,8 +680,8 @@ class MigrationState:
                 continue
             if record.version.components not in repo_by_components:
                 raise MigrationStateError(
-                    "Database has a successful migration {} that does not "
-                    "exist in the repository.".format(record.version)
+                    f"Database has a successful migration {record.version} that does not "
+                    "exist in the repository."
                 )
 
         # Database ahead of repository: current successful version is newer
@@ -710,9 +692,7 @@ class MigrationState:
             if current > latest_repo:
                 raise MigrationStateError(
                     "Database is ahead of the repository "
-                    "(current {} > latest available {}).".format(
-                        current, latest_repo
-                    )
+                    f"(current {current} > latest available {latest_repo})."
                 )
 
     # -- derived state -------------------------------------------------------
@@ -759,7 +739,7 @@ class MigrationState:
         try:
             wanted = Version(target)
         except MigrationFormatError as exc:
-            raise TargetError(str(exc))
+            raise TargetError(str(exc)) from exc
 
         match = None
         for migration in self.migrations:
@@ -768,16 +748,14 @@ class MigrationState:
                 break
         if match is None:
             raise TargetError(
-                "Target version {} does not exist in the repository.".format(
-                    target
-                )
+                f"Target version {target} does not exist in the repository."
             )
 
         current = self.current_version()
         if current is not None and match < current:
             raise TargetError(
-                "Target version {} is lower than the current successful "
-                "version {}.".format(match, current)
+                f"Target version {match} is lower than the current successful "
+                f"version {current}."
             )
         return match
 
@@ -838,8 +816,7 @@ def _read_option_group(group_name, option_file_args):
         return {}
     cmd = ["my_print_defaults"] + list(option_file_args) + [group_name]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
     except OSError:
         return {}
     if proc.returncode != 0:
@@ -877,8 +854,7 @@ def _host_from_print_defaults(option_file_args, mysql_path="mysql"):
     # Option-file flags must precede --print-defaults.
     cmd = [mysql_path] + list(option_file_args) + ["--print-defaults"]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
     except OSError:
         return None
     if proc.returncode != 0:
@@ -1081,10 +1057,8 @@ class Runner:
     def _require_initialized(self):
         if not self.metadata.exists():
             raise MysqlmigError(
-                "{} does not exist in database '{}'.\n"
-                "The database has not been initialized by mysqlmig.".format(
-                    METADATA_TABLE, self.config.database
-                )
+                f"{METADATA_TABLE} does not exist in database '{self.config.database}'.\n"
+                "The database has not been initialized by mysqlmig."
             )
 
     def _load_state(self):
@@ -1111,10 +1085,10 @@ class Runner:
         target = state.resolve_target(self.config.target)
         pending = state.pending(self.config.target)
 
-        _print("Database: {}".format(COLOR.database(self.config.database)))
+        _print(f"Database: {COLOR.database(self.config.database)}")
         _print("Current:  {}".format(
             COLOR.version(current) if current else "(none)"))
-        _print("Target:   {}".format(COLOR.version(target)))
+        _print(f"Target:   {COLOR.version(target)}")
         _print("Latest:   {}".format(
             COLOR.version(latest) if latest else "(none)"))
         _print()
@@ -1123,9 +1097,7 @@ class Runner:
             # The blocking migration is reported on its own line; it is also
             # the first thing a run must resolve, so it is excluded from the
             # plain "pending" list below to avoid listing it twice.
-            _print("Blocking migration: {} ({})".format(
-                COLOR.version(blocking.version),
-                COLOR.status(blocking.status)))
+            _print(f"Blocking migration: {COLOR.version(blocking.version)} ({COLOR.status(blocking.status)})")
             _print()
             remaining = [m for m in pending
                          if m.version != blocking.version]
@@ -1133,13 +1105,13 @@ class Runner:
                 _print("Blocked migrations (cannot run until the blocking "
                        "migration succeeds):")
                 for migration in remaining:
-                    _print("  {}".format(COLOR.pending(migration.filename)))
+                    _print(f"  {COLOR.pending(migration.filename)}")
             return 0
 
         if pending:
             _print("Pending migrations:")
             for migration in pending:
-                _print("  {}".format(COLOR.pending(migration.filename)))
+                _print(f"  {COLOR.pending(migration.filename)}")
         else:
             _print("No pending migrations.")
         return 0
@@ -1158,9 +1130,9 @@ class Runner:
         for r in records:
             # Pad each cell to its column width BEFORE coloring, so the ANSI
             # escape sequences do not throw off column alignment.
-            version_cell = COLOR.version("{:<10}".format(str(r.version)))
-            script_cell = COLOR.script("{:<28}".format(r.script_name))
-            status_cell = COLOR.status(r.status, "{:<12}".format(r.status))
+            version_cell = COLOR.version(f"{str(r.version):<10}")
+            script_cell = COLOR.script(f"{r.script_name:<28}")
+            status_cell = COLOR.status(r.status, f"{r.status:<12}")
             _print("{:<4} {} {} {} {:<26} {}".format(
                 r.id,
                 version_cell,
@@ -1178,8 +1150,7 @@ class Runner:
         # (non-interactive), since running `run` is itself the instruction.
         if not self.metadata.exists():
             if self.interactive:
-                _print("{} does not exist in database '{}'.".format(
-                    METADATA_TABLE, self.config.database))
+                _print(f"{METADATA_TABLE} does not exist in database '{self.config.database}'.")
                 if not self._confirm("Create it now? [y/N]: "):
                     _print("Aborted.")
                     return 1
@@ -1205,7 +1176,7 @@ class Runner:
             current = state.current_version()
             _print("Current: {}".format(
                 COLOR.version(current) if current else "(none)"))
-            _print("Target:  {}".format(COLOR.version(target)))
+            _print(f"Target:  {COLOR.version(target)}")
             _print()
             _print("No pending migrations.")
             return 0
@@ -1219,7 +1190,7 @@ class Runner:
 
         _print()
         _print(COLOR.success("Migration complete."))
-        _print("Current version: {}".format(COLOR.version(pending[-1].version)))
+        _print(f"Current version: {COLOR.version(pending[-1].version)}")
         return 0
 
     def _handle_blocking(self, blocking, state):
@@ -1227,8 +1198,8 @@ class Runner:
         migration = state.migration_for(blocking.version)
         if migration is None:
             raise MigrationStateError(
-                "Blocking migration {} is not present in the repository; "
-                "cannot retry.".format(blocking.version)
+                f"Blocking migration {blocking.version} is not present in the repository; "
+                "cannot retry."
             )
 
         if not self.interactive:
@@ -1245,7 +1216,7 @@ class Runner:
         else:
             _print(COLOR.warning("Previous migration did not finish:"))
         _print()
-        _print("  {}".format(migration.filename))
+        _print(f"  {migration.filename}")
         _print()
         _print(COLOR.warning(
             "The migration may have partially changed the database."))
@@ -1267,7 +1238,7 @@ class Runner:
             self.metadata.insert_in_progress(
                 str(migration.version), migration.filename)
 
-        _print("Executing: {}".format(migration.filename))
+        _print(f"Executing: {migration.filename}")
         result = self.client.run_migration(sql_text)
 
         status = STATUS_SUCCESS if result.ok else STATUS_FAILED
@@ -1285,7 +1256,7 @@ class Runner:
 
         _print("  {}".format(COLOR.failure("FAILED")))
         _print()
-        _eprint(COLOR.failure("Migration failed: {}".format(migration.filename)))
+        _eprint(COLOR.failure(f"Migration failed: {migration.filename}"))
         if not self.config.verbose:
             _eprint(result.output.rstrip("\n"))
         return False
@@ -1294,11 +1265,11 @@ class Runner:
         current = state.current_version()
         _print("Current: {}".format(
             COLOR.version(current) if current else "(none)"))
-        _print("Target:  {}".format(COLOR.version(target)))
+        _print(f"Target:  {COLOR.version(target)}")
         _print()
         _print("Pending migrations:")
         for migration in pending:
-            _print("  {}".format(COLOR.pending(migration.filename)))
+            _print(f"  {COLOR.pending(migration.filename)}")
         _print()
         _print(COLOR.warning("Dry run: no migrations executed."))
         return 0
@@ -1307,16 +1278,16 @@ class Runner:
 def _read_migration_sql(path):
     """Read a migration file as UTF-8. Non-UTF-8 files are invalid."""
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             return handle.read()
-    except UnicodeDecodeError:
+    except UnicodeDecodeError as exc:
         raise MysqlmigError(
-            "Migration file {} is not valid UTF-8.".format(path)
-        )
+            f"Migration file {path} is not valid UTF-8."
+        ) from exc
     except OSError as exc:
         raise MysqlmigError(
-            "Could not read migration file {}: {}".format(path, exc)
-        )
+            f"Could not read migration file {path}: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1424,12 +1395,12 @@ class InteractiveMenu:
 
     def _header(self):
         self._output(COLOR.heading(
-            "MySQL Migration Tool v{}".format(__version__)))
+            f"MySQL Migration Tool v{__version__}"))
         self._output()
         host = self._display_host()
         if host:
-            self._output("Host:     {}".format(host))
-        self._output("Database: {}".format(COLOR.database(self.config.database)))
+            self._output(f"Host:     {host}")
+        self._output(f"Database: {COLOR.database(self.config.database)}")
 
     def _display_host(self):
         """The configured host for the header (CLI --host, option files, or
@@ -1471,7 +1442,7 @@ class InteractiveMenu:
             elif choice == "5" or choice.lower() in ("exit", "quit", "q"):
                 return 0
             else:
-                self._output("Invalid choice: {!r}".format(choice))
+                self._output(f"Invalid choice: {choice!r}")
 
     def _separator(self):
         """Visual divider shown between command output and the next menu."""
@@ -1500,18 +1471,16 @@ class InteractiveMenu:
         else:
             # Fresh database: no table yet, so list the repo migrations (all of
             # which are pending) and note that running will create the table.
-            self._output("{} does not exist in database '{}' yet; "
-                         "running will create it.".format(
-                             METADATA_TABLE, self.config.database))
+            self._output(f"{METADATA_TABLE} does not exist in database '{self.config.database}' yet; "
+                         "running will create it.")
             self._output()
             migrations = discover_migrations(self.config.directory)
             if not migrations:
-                self._output("No migrations found in '{}'.".format(
-                    self.config.directory))
+                self._output(f"No migrations found in '{self.config.directory}'.")
                 return
             self._output("Pending migrations:")
             for migration in migrations:
-                self._output("  {}".format(COLOR.pending(migration.filename)))
+                self._output(f"  {COLOR.pending(migration.filename)}")
             self._output()
 
         try:
@@ -1534,20 +1503,13 @@ class InteractiveMenu:
         try:
             action()
         except MysqlmigError as exc:
-            self._output(COLOR.failure("ERROR: {}".format(exc)))
+            self._output(COLOR.failure(f"ERROR: {exc}"))
         self._separator()
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-
-import argparse
-import inspect
-import sys
-
-
-_COMMANDS = ("status", "history", "run")
 
 
 def _add_global_options(parser):
@@ -1585,20 +1547,15 @@ def _add_run_options(parser):
                         default=argparse.SUPPRESS)
 
 
-# --help and --version are handled in main() before argparse so help can be
-# colored consistently across Python versions. The parser is built with
-# add_help=False; -h maps to --host, not help.
+# --help and --version are handled in main() before argparse so we can render
+# colored help ourselves. The parser is built with add_help=False; -h maps to
+# --host, not help.
 def build_parser():
-    parser_kwargs = dict(
+    parser = argparse.ArgumentParser(
         prog="mysqlmig",
         description="Simple, deterministic MySQL schema migration executor.",
         add_help=False,
     )
-    # argparse gained automatic help coloring in Python 3.14; disable it since
-    # we render help ourselves. The `color` keyword is absent before 3.14.
-    if "color" in inspect.signature(argparse.ArgumentParser).parameters:
-        parser_kwargs["color"] = False
-    parser = argparse.ArgumentParser(**parser_kwargs)
 
     # Globals + run options are also placed on the subparsers (via a shared
     # parent) so they may appear either before or after the command.
@@ -1700,7 +1657,7 @@ def main(argv=None):
         _print(render_help())
         return 0
     if "--version" in argv:
-        _print("mysqlmig {}".format(__version__))
+        _print(f"mysqlmig {__version__}")
         return 0
 
     parser = build_parser()
@@ -1721,10 +1678,10 @@ def main(argv=None):
             return runner.history()
         if args.command == "run":
             return runner.run()
-        _eprint("Unknown command: {}".format(args.command))
+        _eprint(f"Unknown command: {args.command}")
         return 1
     except MysqlmigError as exc:
-        _eprint(COLOR.failure("ERROR: {}".format(exc)))
+        _eprint(COLOR.failure(f"ERROR: {exc}"))
         return 1
 
 

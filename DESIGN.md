@@ -34,7 +34,7 @@ DBAs write SQL migration files, commit them to Git, and use `mysqlmig` to execut
 
 Implementation requirements:
 
-* Python 3.8 or newer (the floor is Ubuntu 20.04's system `python3`)
+* Python 3.12 or newer (the floor is Ubuntu 24.04's system `python3`)
 * standard library only
 * single script (`mysqlmig.py`)
 * uses the existing `mysql` command-line client

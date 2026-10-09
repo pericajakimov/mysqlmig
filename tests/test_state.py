@@ -4,21 +4,21 @@ import pytest
 
 from mysqlmig import (
     LATEST,
+    STATUS_FAILED,
+    STATUS_IN_PROGRESS,
+    STATUS_SUCCESS,
     Migration,
     MigrationRecord,
     MigrationState,
     MigrationStateError,
     TargetError,
     Version,
-    STATUS_SUCCESS,
-    STATUS_FAILED,
-    STATUS_IN_PROGRESS,
 )
 
 
 def mig(version_raw):
     v = Version(version_raw)
-    name = "{}_desc.sql".format(version_raw)
+    name = f"{version_raw}_desc.sql"
     return Migration(v, "desc", name, "/x/" + name)
 
 
@@ -26,7 +26,7 @@ def rec(id, version_raw, status):
     return MigrationRecord(
         id=id,
         version=Version(version_raw),
-        script_name="{}_desc.sql".format(version_raw),
+        script_name=f"{version_raw}_desc.sql",
         status=status,
         execution_start="2026-10-08 10:00:00.000",
         execution_time=None if status == STATUS_IN_PROGRESS else "00:00:01.0",

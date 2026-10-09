@@ -8,7 +8,6 @@ from mysqlmig import (
     parse_migration_filename,
 )
 
-
 # -- filename parsing --------------------------------------------------------
 
 @pytest.mark.parametrize(

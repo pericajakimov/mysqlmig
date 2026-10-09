@@ -103,10 +103,10 @@ def mysql_db():
 
     base = os.environ.get("MYSQLMIG_TEST_DB", "mysqlmig_test")
     # Unique suffix so parallel/repeated runs never collide.
-    dbname = "{}_{}".format(base, uuid.uuid4().hex[:8])
+    dbname = f"{base}_{uuid.uuid4().hex[:8]}"
 
     create = _run_mysql(
-        "CREATE DATABASE `{}` CHARACTER SET utf8mb4;".format(dbname)
+        f"CREATE DATABASE `{dbname}` CHARACTER SET utf8mb4;"
     )
     if create.returncode != 0:
         pytest.skip("Could not create test database: " + create.stderr.strip())
@@ -114,7 +114,7 @@ def mysql_db():
     try:
         yield dbname
     finally:
-        _run_mysql("DROP DATABASE IF EXISTS `{}`;".format(dbname))
+        _run_mysql(f"DROP DATABASE IF EXISTS `{dbname}`;")
 
 
 @pytest.fixture()

@@ -16,7 +16,7 @@ For the full rationale and detailed behavior, see [DESIGN.md](DESIGN.md).
 
 ## Requirements
 
-* Python 3.8 or newer (standard library only — no packages to install to run the tool).
+* Python 3.12 or newer (standard library only — no packages to install to run the tool).
 * The `mysql` command-line client on `PATH`.
 * A MySQL server you can connect to, with credentials available to the `mysql` client
   (for example via `.my.cnf`, `.mylogin.cnf`, or a login path).

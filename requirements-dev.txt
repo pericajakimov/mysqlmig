@@ -1,3 +1,4 @@
 # Development/test dependencies only.
 # mysqlmig itself has NO runtime dependencies (Python standard library only).
 pytest>=7,<10
+ruff>=0.5

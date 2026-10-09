@@ -4,7 +4,7 @@ The menu's Runner is replaced with a stub that records which command was
 invoked, so routing and loop/exit behavior can be tested without MySQL.
 """
 
-from mysqlmig import Config, ConnectionConfig, HELP_TEXT, InteractiveMenu, MysqlmigError
+from mysqlmig import HELP_TEXT, Config, ConnectionConfig, InteractiveMenu, MysqlmigError
 
 
 class StubClient:
@@ -72,7 +72,7 @@ def _menu(inputs):
         try:
             return next(it)
         except StopIteration:
-            raise EOFError
+            raise EOFError from None
 
     menu = InteractiveMenu(config, input_fn=fake_input,
                            output_fn=lambda msg="": output.append(msg))
@@ -189,7 +189,7 @@ def _menu_with(stub, inputs):
         try:
             return next(it)
         except StopIteration:
-            raise EOFError
+            raise EOFError from None
 
     menu = InteractiveMenu(stub.config, input_fn=fake_input,
                            output_fn=lambda m="": output.append(m))

@@ -10,6 +10,9 @@ import time
 import pytest
 
 from mysqlmig import (
+    STATUS_FAILED,
+    STATUS_IN_PROGRESS,
+    STATUS_SUCCESS,
     Config,
     ConnectionConfig,
     Metadata,
@@ -17,10 +20,6 @@ from mysqlmig import (
     MysqlClient,
     MysqlmigError,
     Runner,
-    STATUS_FAILED,
-    STATUS_IN_PROGRESS,
-    STATUS_SUCCESS,
-    Version,
 )
 
 pytestmark = pytest.mark.integration
