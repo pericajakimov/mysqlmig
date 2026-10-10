@@ -49,9 +49,42 @@ def test_no_command():
     assert ns.command is None
 
 
+def test_init_command_parses():
+    ns = _parse(["init", "-D", "demo"])
+    assert ns.command == "init"
+    assert _get(ns, "db") == "demo"
+
+
+def test_dry_run_option_removed():
+    # --dry-run no longer exists; argparse should reject it.
+    import pytest
+    with pytest.raises(SystemExit):
+        _parse(["run", "--dry-run"])
+
+
 def test_long_and_short_db_equivalent():
     assert _get(_parse(["run", "--db", "x"]), "db") == "x"
     assert _get(_parse(["run", "-D", "x"]), "db") == "x"
+
+
+# -- help rendering ----------------------------------------------------------
+
+# -- run-only options require the run command --------------------------------
+
+def test_to_without_command_errors(capsys):
+    from mysqlmig import main
+    rc = main(["--to", "v1.0"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--to" in err and "run" in err
+
+
+def test_verbose_without_command_errors(capsys):
+    from mysqlmig import main
+    rc = main(["--verbose"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--verbose" in err
 
 
 # -- help rendering ----------------------------------------------------------

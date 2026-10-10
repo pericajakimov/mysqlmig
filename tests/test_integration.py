@@ -31,13 +31,12 @@ def _write(dirpath, name, sql):
     (dirpath / name).write_text(sql, encoding="utf-8")
 
 
-def _config(database, directory, target=None, dry_run=False, verbose=False):
+def _config(database, directory, target=None, verbose=False):
     return Config(
         database=database,
         directory=str(directory),
         connection=ConnectionConfig(database=database),
         target=target,
-        dry_run=dry_run,
         verbose=verbose,
     )
 
@@ -49,6 +48,16 @@ def _runner(database, directory, interactive=False, **kw):
 def _records(database):
     client = MysqlClient(ConnectionConfig(database=database))
     return Metadata(client).load_records()
+
+
+def _log(database, version):
+    """Read a migration's execution_log directly from the database."""
+    client = MysqlClient(ConnectionConfig(database=database))
+    rows = client.query(
+        "SELECT execution_log FROM schema_version "
+        f"WHERE version = '{version}';"
+    )
+    return rows[0][0] if rows else None
 
 
 # --- metadata ---------------------------------------------------------------
@@ -113,7 +122,7 @@ def test_retry_updates_in_place_and_appends_log(mysql_db):
     # Still exactly one row (updated in place, not duplicated).
     assert len(recs) == 1
     assert recs[0].status == STATUS_SUCCESS
-    log = meta.get_log("v1.0")
+    log = _log(mysql_db, "v1.0")
     assert "FIRST" in log
     assert "SECOND" in log
 
@@ -147,15 +156,6 @@ def test_run_no_pending_is_success(mysql_db, tmp_path):
     assert _runner(mysql_db, tmp_path).run() == 0
 
 
-def test_run_dry_run_changes_nothing(mysql_db, tmp_path):
-    _write(tmp_path, "v1.0_a.sql", "CREATE TABLE a (id INT PRIMARY KEY);")
-    rc = _runner(mysql_db, tmp_path, dry_run=True).run()
-    assert rc == 0
-    # Metadata was created but no migration recorded.
-    recs = _records(mysql_db)
-    assert recs == []
-
-
 # --- failure + blocking -----------------------------------------------------
 
 def test_failed_migration_records_and_blocks(mysql_db, tmp_path):
@@ -179,9 +179,44 @@ def test_blocking_migration_non_interactive_stops(mysql_db, tmp_path):
     assert _runner(mysql_db, tmp_path).run() == 1
 
     # A second non-interactive run must refuse to retry and raise an error
-    # (surfaced as exit 1 via main-style handling); Runner.run raises here.
-    with pytest.raises(MysqlmigError):
+    # whose message names the actual blocking status (not "previously ...").
+    with pytest.raises(MysqlmigError) as exc:
         _runner(mysql_db, tmp_path).run()
+    assert "is in state FAILED" in str(exc.value)
+
+
+def test_init_creates_metadata(mysql_db, tmp_path):
+    # init on an existing (empty) database creates the table and view.
+    runner = _runner(mysql_db, tmp_path)
+    assert runner.init() == 0
+    assert runner.metadata.exists() is True
+
+
+def test_init_idempotent_reports_already_initialized(mysql_db, tmp_path, capsys):
+    runner = _runner(mysql_db, tmp_path)
+    runner.init()
+    capsys.readouterr()  # clear
+    # Second init succeeds (exit 0) and reports it was already initialized.
+    assert runner.init() == 0
+    out = capsys.readouterr().out
+    assert "lready initialized" in out
+
+
+def test_init_does_not_create_database(mysql_db, tmp_path):
+    # init must NOT create a missing database; it errors instead (a dedicated
+    # migration user typically lacks CREATE DATABASE privilege).
+    missing_db = mysql_db + "_missing"
+    cfg = _config(missing_db, tmp_path)
+    runner = Runner(cfg, interactive=False)
+    with pytest.raises(MysqlmigError):
+        runner.init()
+    # The database was not created as a side effect.
+    client = MysqlClient(ConnectionConfig(database=mysql_db))
+    rows = client.query(
+        "SELECT COUNT(*) FROM information_schema.schemata "
+        f"WHERE schema_name = '{missing_db}';"
+    )
+    assert rows[0][0] == "0"
 
 
 def test_failed_then_successful_retry(mysql_db, tmp_path):
@@ -199,8 +234,7 @@ def test_failed_then_successful_retry(mysql_db, tmp_path):
     assert len(recs) == 1
     assert recs[0].status == STATUS_SUCCESS
     # Log retains both attempts.
-    client = MysqlClient(ConnectionConfig(database=mysql_db))
-    log = Metadata(client).get_log("v1.0")
+    log = _log(mysql_db, "v1.0")
     assert "ERROR" in log  # from the failed attempt
 
 

@@ -60,7 +60,7 @@ def _base_conn_args():
 
 def _run_mysql(sql, database=None):
     """Run SQL through the mysql client. Returns CompletedProcess."""
-    cmd = ["mysql"] + _base_conn_args() + ["--batch", "--skip-column-names"]
+    cmd = ["mysql", *_base_conn_args(), "--batch", "--skip-column-names"]
     if database:
         cmd.append(database)
     return subprocess.run(

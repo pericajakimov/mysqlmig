@@ -14,7 +14,7 @@ class Args:
         defaults = {
             "db": None, "dir": None, "host": None, "port": None, "user": None,
             "login_path": None, "defaults_file": None, "defaults_extra_file": None,
-            "to": None, "dry_run": False, "verbose": False,
+            "to": None, "verbose": False,
         }
         defaults.update(kw)
         for key, value in defaults.items():
@@ -119,9 +119,8 @@ def test_connection_options_passed_through():
 
 def test_run_options_carried_into_config():
     cfg = _resolve_config(
-        Args(db="app", to="v1.5", dry_run=True, verbose=True),
+        Args(db="app", to="v1.5", verbose=True),
         group_reader=group(),
     )
     assert cfg.target == "v1.5"
-    assert cfg.dry_run is True
     assert cfg.verbose is True

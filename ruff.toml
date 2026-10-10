@@ -8,11 +8,13 @@ line-length = 100
 # import sorting (I), bugbear (B), comprehensions (C4), and pyupgrade (UP).
 # pyupgrade + target-version flags anything that could be modernized for or is
 # incompatible with 3.12, which is exactly the compatibility signal we want.
-select = ["E", "W", "F", "I", "B", "C4", "UP"]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "RUF"]
 ignore = [
     "E501",  # line length is enforced by the formatter, not the linter
 ]
 
 [lint.per-file-ignores]
-# Tests may redefine fixtures/names and use asserts freely.
-"tests/*" = ["B011"]
+# Tests may redefine fixtures/names and use asserts freely. RUF059 (unused
+# unpacked variable) is noisy for tests that unpack a fixture tuple and only
+# use some of it.
+"tests/*" = ["B011", "RUF059"]

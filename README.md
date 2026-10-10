@@ -81,6 +81,7 @@ mysqlmig
 
 | Command   | Description                                              | Read-only |
 |-----------|----------------------------------------------------------|-----------|
+| `init`    | Create the metadata objects in an existing database      | no        |
 | `status`  | Current version, latest, target, pending, and blockers   | yes       |
 | `history` | Migration history from the `v_schema_version` view       | yes       |
 | `run`     | Execute pending migrations up to the target              | no        |
@@ -88,19 +89,23 @@ mysqlmig
 ### Examples
 
 ```bash
-mysqlmig status                      # current migration state
+mysqlmig init                        # create the metadata in an existing db (idempotent)
+mysqlmig status                      # current migration state (also previews pending)
 mysqlmig history                     # applied-migration history
 mysqlmig run                         # migrate to the latest version
 mysqlmig run --to v1.7               # migrate up to and including v1.7
-mysqlmig run --dry-run               # show the plan, change nothing
 mysqlmig run --verbose               # show full mysql client output
 ```
 
+To preview what a `run` would do without changing anything, use `status` — it
+lists the pending migrations. (There is no separate dry-run flag.)
+
 ### Interactive vs non-interactive
 
-* No command → **interactive** menu (shows version, status, history, run, help).
-* A command (`status` / `history` / `run`) → **non-interactive**; never prompts, suitable
-  for scripts, CI, and cron.
+* No command → **interactive** menu (header shows version/host/database; options: init,
+  status, history, run, help).
+* A command (`init` / `status` / `history` / `run`) → **non-interactive**; never prompts,
+  suitable for scripts, CI, and cron.
 
 ---
 
@@ -125,7 +130,6 @@ Global options (valid for all commands):
 
 ```text
 --to VERSION|latest (-t)   Target version (default: latest)
---dry-run                  Calculate and show the plan without executing
 --verbose (-v)             Display full mysql client output
 ```
 
@@ -200,8 +204,11 @@ WHERE version = 'v1.7';
 ```
 
 If `schema_version` does not exist yet, `status` and `history` report that the database is
-not initialized. `run` creates the metadata (after confirmation in interactive mode) as part
-of applying the first migration.
+not initialized and suggest running `mysqlmig init`. `init` creates the metadata objects in
+an **existing** database (it does not create the database itself — provision that separately,
+since migration users usually lack `CREATE DATABASE`); it is idempotent and reports a warning
+if already initialized. `run` also creates the metadata as part of applying the first
+migration (after confirmation in interactive mode), so running `init` first is optional.
 
 ---
 
@@ -211,10 +218,14 @@ of applying the first migration.
   A failed migration may have partially changed the database.
 * A failed migration is recorded as `FAILED` and execution stops. It blocks all later migrations
   until it succeeds.
-* If `mysqlmig` is interrupted mid-migration, the record is left `IN_PROGRESS`. This also blocks
-  later migrations.
+* If `mysqlmig` itself is interrupted mid-migration (e.g. Ctrl-C), the record is left
+  `IN_PROGRESS` — the outcome is unknown. This also blocks later migrations.
+* Note: if the server aborts the running statement instead (e.g. `KILL QUERY` from another
+  session), the client returns an error, so the migration is recorded `FAILED` rather than
+  `IN_PROGRESS`. (`FAILED` = ran and errored; `IN_PROGRESS` = mysqlmig was interrupted.)
 * On the next `run`, a blocking migration (`FAILED` or `IN_PROGRESS`) must be retried first.
-  Interactive mode asks for confirmation; non-interactive mode stops with an error.
+  Interactive mode asks for confirmation; non-interactive mode stops with an error naming the
+  state (e.g. "Migration X is in state FAILED.").
 * A successful retry updates the existing record in place (status → `SUCCESS`) and appends the
   new output to the log. No duplicate row is created.
 

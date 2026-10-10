@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mysqlmig — Manual Testing Checklist</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --fg: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #4cc2ff;
+    --done: #3ad29f;
+    --border: #262b36;
+    --code-bg: #0b0d12;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9; --panel: #ffffff; --fg: #1c2027; --muted: #5b6472;
+      --accent: #0a84c2; --done: #16a06f; --border: #e2e5ea; --code-bg: #f0f2f5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 14px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 20px 80px; }
+  .progress { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 10px; }
+  .bar { flex: 1; height: 10px; background: var(--border); border-radius: 6px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; width: 0; background: var(--done); transition: width .2s; }
+  .count { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  button {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 7px; padding: 7px 12px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  h2 {
+    margin: 32px 0 10px; padding-bottom: 6px; font-size: 16px;
+    border-bottom: 1px solid var(--border); color: var(--accent);
+  }
+  h3 { margin: 18px 0 6px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li.item {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 7px 10px; border-radius: 8px;
+  }
+  li.item:hover { background: var(--code-bg); }
+  li.item.checked label { color: var(--muted); text-decoration: line-through; }
+  input[type=checkbox] { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--done); cursor: pointer; flex: none; }
+  label { cursor: pointer; }
+  code {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px;
+    padding: 1px 5px; font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; margin: 8px 0 14px;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  .note { color: var(--muted); margin: 6px 0 10px; }
+  .intro { color: var(--muted); margin-bottom: 8px; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 40px; border-top: 1px solid var(--border); padding-top: 14px; }
+  textarea { width: 100%; min-height: 120px; background: var(--code-bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px; font: 13px/1.5 ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mysqlmig — Testing Checklist</h1>
+  <div class="progress">
+    <div class="bar"><span id="barFill"></span></div>
+    <span class="count" id="count">0 / 0</span>
+  </div>
+  <button id="resetBtn" title="Uncheck everything">Reset</button>
+</header>
+
+<div class="wrap">
+  <p class="intro">Clickable checklist for exercising mysqlmig against a real MySQL server.
+  Your checks and notes are saved in this browser automatically (localStorage) — safe to refresh.</p>
+
+  <h2>0. Preparation</h2>
+  <ul data-section="prep">
+    <li class="item"><input type="checkbox"><label><code>mysql</code> client on PATH: <code>mysql --version</code></label></li>
+    <li class="item"><input type="checkbox"><label>Bare client connects: <code>mysql -e "SELECT 1;"</code></label></li>
+    <li class="item"><input type="checkbox"><label>Chosen a throwaway database (e.g. <code>demo</code>) — never a real one.</label></li>
+    <li class="item"><input type="checkbox"><label>Know where migration files are (<code>migrations/demo/</code>, <code>migrations/scenarios/</code>).</label></li>
+    <li class="item"><input type="checkbox"><label>Create the test db: <code>mysql -e "CREATE DATABASE demo CHARACTER SET utf8mb4;"</code></label></li>
+  </ul>
+  <p class="note">Reset between tests:</p>
+  <pre><code>mysql -e "DROP DATABASE IF EXISTS demo; CREATE DATABASE demo CHARACTER SET utf8mb4;"</code></pre>
+
+  <h2>1. Help and version</h2>
+  <ul data-section="help">
+    <li class="item"><input type="checkbox"><label><code>mysqlmig --help</code> prints colored help (bold headings, green commands, cyan flags, yellow metavars) in a terminal.</label></li>
+    <li class="item"><input type="checkbox"><label><code>mysqlmig --help | cat</code> is plain (no color codes) when piped.</label></li>
+    <li class="item"><input type="checkbox"><label><code>NO_COLOR=1 mysqlmig --help</code> is plain even in a terminal.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--help</code> shows descriptions for <code>--defaults-file</code> and <code>--defaults-extra-file</code>.</label></li>
+    <li class="item"><input type="checkbox"><label><code>mysqlmig --version</code> prints version and exits 0.</label></li>
+    <li class="item"><input type="checkbox"><label>Works with options present: <code>mysqlmig --help -D demo</code> still shows help.</label></li>
+  </ul>
+
+  <h2>2. Database and directory resolution</h2>
+  <ul data-section="dir">
+    <li class="item"><input type="checkbox"><label><code>mysqlmig status -D demo</code> (no <code>--dir</code>) looks in <code>migrations/demo</code>.</label></li>
+    <li class="item"><input type="checkbox"><label><code>status -D demo --dir migrations/demo</code> uses that exact folder.</label></li>
+    <li class="item"><input type="checkbox"><label><code>status -D demo --dir /abs/path</code> is used literally.</label></li>
+    <li class="item"><input type="checkbox"><label>Non-existent <code>--dir</code> gives a clear error and exit 1.</label></li>
+    <li class="item"><input type="checkbox"><label>With <code>db</code> only in <code>[mysqlmig]</code> (no <code>-D</code>), bare <code>migrations/</code> is used (no subfolder).</label></li>
+    <li class="item"><input type="checkbox"><label>No db anywhere → clear "no database" error.</label></li>
+  </ul>
+
+  <h2>3. Argument ordering (before AND after the command)</h2>
+  <ul data-section="order">
+    <li class="item"><input type="checkbox"><label><code>mysqlmig -D demo run</code> (option before command).</label></li>
+    <li class="item"><input type="checkbox"><label><code>mysqlmig run -D demo</code> (option after command).</label></li>
+    <li class="item"><input type="checkbox"><label><code>mysqlmig status -D demo</code>.</label></li>
+    <li class="item"><input type="checkbox"><label><code>mysqlmig run --to v1.1 -D demo</code> (run option + global after command).</label></li>
+    <li class="item"><input type="checkbox"><label><code>mysqlmig -D demo run --to v1.1 --verbose</code> (mixed).</label></li>
+    <li class="item"><input type="checkbox"><label><code>-h</code> means host not help: <code>status -D demo -h 127.0.0.1</code> connects / errors, does not print help.</label></li>
+  </ul>
+
+  <h2>4. The three commands (non-interactive)</h2>
+  <h3>status</h3>
+  <ul data-section="status">
+    <li class="item"><input type="checkbox"><label>Fresh db: <code>status</code> reports "not initialized", exit 1.</label></li>
+    <li class="item"><input type="checkbox"><label>After migrations: shows Database, Current, Target, Latest, Pending.</label></li>
+    <li class="item"><input type="checkbox"><label>Colors: Database bold white, versions cyan, pending scripts bright blue.</label></li>
+  </ul>
+  <h3>run</h3>
+  <ul data-section="run">
+    <li class="item"><input type="checkbox"><label>Fresh db: <code>run -D demo</code> creates metadata, applies all in order, SUCCESS each, "Migration complete".</label></li>
+    <li class="item"><input type="checkbox"><label>Re-run when done: "No pending migrations", exit 0.</label></li>
+    <li class="item"><input type="checkbox"><label><code>run -D demo --to v1.1</code> applies only up to v1.1.</label></li>
+    <li class="item"><input type="checkbox"><label><code>run -D demo --dry-run</code> shows plan, changes nothing (verify <code>history</code> unchanged).</label></li>
+    <li class="item"><input type="checkbox"><label><code>run -D demo --verbose</code> shows full mysql client output.</label></li>
+    <li class="item"><input type="checkbox"><label>Target below current rejected (at v1.3, <code>run --to v1.1</code>).</label></li>
+    <li class="item"><input type="checkbox"><label>Non-existent target (<code>run --to v9.9</code>) rejected.</label></li>
+  </ul>
+  <h3>history</h3>
+  <ul data-section="history">
+    <li class="item"><input type="checkbox"><label>Fresh db: "not initialized".</label></li>
+    <li class="item"><input type="checkbox"><label>After runs: one row per migration (ID, VERSION, SCRIPT, STATUS, EXECUTION START, TIME).</label></li>
+    <li class="item"><input type="checkbox"><label>STATUS colored (green/red/yellow).</label></li>
+    <li class="item"><input type="checkbox"><label>EXECUTION START and TIME clearly separated.</label></li>
+    <li class="item"><input type="checkbox"><label>TIME is <code>HH:MM:SS.mmm</code> (3 decimals).</label></li>
+  </ul>
+
+  <h2>5. Failure, blocking, and retry (migrations/scenarios/)</h2>
+  <h3>failure</h3>
+  <ul data-section="fail">
+    <li class="item"><input type="checkbox"><label>Copy <code>scenarios/v1.4_will_fail.sql</code> into <code>migrations/demo/</code>, run → v1.4 FAILED, stops, exit 1, mysql error shown.</label></li>
+    <li class="item"><input type="checkbox"><label><code>status</code> shows blocking FAILED; later ones listed as "Blocked".</label></li>
+    <li class="item"><input type="checkbox"><label>Full output stored: <code>mysql demo -e "SELECT status, execution_log FROM schema_version WHERE version='v1.4'\G"</code></label></li>
+  </ul>
+  <h3>blocking stops non-interactive run</h3>
+  <ul data-section="block">
+    <li class="item"><input type="checkbox"><label>With v1.4 FAILED, <code>run -D demo</code> refuses to retry, "interactive terminal required" error, exit 1.</label></li>
+  </ul>
+  <h3>retry after fixing (interactive)</h3>
+  <ul data-section="retry">
+    <li class="item"><input type="checkbox"><label>Replace with <code>scenarios/v1.4_fixed.sql</code> (keep v1.4), run interactively, confirm retry.</label></li>
+    <li class="item"><input type="checkbox"><label>v1.4 flips FAILED → SUCCESS in place (no duplicate row; COUNT = 1).</label></li>
+    <li class="item"><input type="checkbox"><label><code>execution_log</code> retains BOTH attempts.</label></li>
+  </ul>
+  <h3>interruption (left IN_PROGRESS)</h3>
+  <ul data-section="interrupt">
+    <li class="item"><input type="checkbox"><label>Copy <code>scenarios/v1.5_long_sleep.sql</code>, run; while sleeping, interrupt (Ctrl-C, or <code>KILL QUERY &lt;id&gt;</code> via <code>SHOW PROCESSLIST</code>).</label></li>
+    <li class="item"><input type="checkbox"><label><code>status</code> shows v1.5 blocking (IN_PROGRESS).</label></li>
+    <li class="item"><input type="checkbox"><label><code>history</code> shows IN_PROGRESS row with blank/<code>-</code> TIME.</label></li>
+    <li class="item"><input type="checkbox"><label>Non-interactive run stops; interactive run offers retry.</label></li>
+  </ul>
+
+  <h2>6. Configuration ([mysqlmig] + option files)</h2>
+  <p class="note">Create <code>/tmp/mysqlmig-test.cnf</code>:</p>
+  <pre><code>[mysqlmig]
+db=demo
+dir=migrations/demo
+
+[client]
+host=127.0.0.1</code></pre>
+  <ul data-section="config">
+    <li class="item"><input type="checkbox"><label><code>mysqlmig --defaults-file=/tmp/mysqlmig-test.cnf status</code> uses db+dir from the file (no <code>-D</code>/<code>--dir</code>).</label></li>
+    <li class="item"><input type="checkbox"><label>CLI <code>-D other</code> overrides <code>[mysqlmig] db</code>.</label></li>
+    <li class="item"><input type="checkbox"><label>CLI <code>--dir X</code> overrides <code>[mysqlmig] dir</code>.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--defaults-file</code> means ONLY that file is read (host in it used; remove → fallback).</label></li>
+    <li class="item"><input type="checkbox"><label><code>--defaults-extra-file</code> adds on top of <code>~/.my.cnf</code> (both consulted).</label></li>
+    <li class="item"><input type="checkbox"><label>Precedence: CLI &gt; <code>[mysqlmig]</code> &gt; defaults.</label></li>
+    <li class="item"><input type="checkbox"><label>Same <code>--defaults-file</code> controls BOTH <code>[mysqlmig]</code> and the mysql client connection.</label></li>
+  </ul>
+
+  <h2>7. Connection options and host display</h2>
+  <ul data-section="conn">
+    <li class="item"><input type="checkbox"><label><code>status -D demo -h 127.0.0.1 -P 3306 -u &lt;user&gt;</code> connects.</label></li>
+    <li class="item"><input type="checkbox"><label><code>-L &lt;login-path&gt;</code> uses a configured login path.</label></li>
+    <li class="item"><input type="checkbox"><label>Bad host → clear connection error (exit 1), no crash.</label></li>
+    <li class="item"><input type="checkbox"><label>Interactive "Host:" shows <code>--host</code> value, else option-file host, else <code>localhost</code>.</label></li>
+    <li class="item"><input type="checkbox"><label>Host display is NEVER the server's <code>@@hostname</code>.</label></li>
+  </ul>
+
+  <h2>8. Interactive mode</h2>
+  <p class="note">Run with no command: <code>mysqlmig -D demo</code></p>
+  <ul data-section="interactive">
+    <li class="item"><input type="checkbox"><label>Header: version (bold), Host, Database (bold white).</label></li>
+    <li class="item"><input type="checkbox"><label>Menu: 1 Status, 2 History, 3 Run, 4 Help, 5 Exit.</label></li>
+    <li class="item"><input type="checkbox"><label>Visual separator between output and next menu.</label></li>
+    <li class="item"><input type="checkbox"><label>1 Status shows state; 2 History shows table.</label></li>
+    <li class="item"><input type="checkbox"><label>4 Help prints colored help, menu reappears.</label></li>
+    <li class="item"><input type="checkbox"><label>5 / <code>exit</code> / <code>quit</code> / <code>q</code> / Ctrl-D all exit cleanly.</label></li>
+    <li class="item"><input type="checkbox"><label>Invalid choice reprompts without crashing.</label></li>
+    <li class="item"><input type="checkbox"><label>Fresh db Run: shows "not initialized" note AND lists all pending, then prompts; confirm create applies.</label></li>
+    <li class="item"><input type="checkbox"><label>Initialized + pending Run: shows status + pending, then prompts "Target version [latest]:".</label></li>
+    <li class="item"><input type="checkbox"><label>Specific version migrates only up to it.</label></li>
+    <li class="item"><input type="checkbox"><label>Blank (Enter) migrates to latest.</label></li>
+    <li class="item"><input type="checkbox"><label>Already at latest: Run shows "No pending migrations", NO target prompt.</label></li>
+    <li class="item"><input type="checkbox"><label>Command error inside menu is shown but does not exit the menu.</label></li>
+  </ul>
+
+  <h2>9. Multiple databases / directories</h2>
+  <ul data-section="multi">
+    <li class="item"><input type="checkbox"><label>Second db (e.g. <code>reporting</code>) with its own folder is managed independently.</label></li>
+    <li class="item"><input type="checkbox"><label>Same db: while one run is mid-migration (sleep scenario), a second run is blocked by IN_PROGRESS.</label></li>
+    <li class="item"><input type="checkbox"><label>Different dbs can proceed independently.</label></li>
+  </ul>
+
+  <h2>10. Migration file validation</h2>
+  <ul data-section="validate">
+    <li class="item"><input type="checkbox"><label>Non-<code>.sql</code> / non-matching name is ignored (not executed).</label></li>
+    <li class="item"><input type="checkbox"><label>Two files same version (<code>v1.1_a.sql</code> + <code>1.1_b.sql</code>) → duplicate error.</label></li>
+    <li class="item"><input type="checkbox"><label>Mixed <code>v</code>-prefixed and non-prefixed → rejected.</label></li>
+    <li class="item"><input type="checkbox"><label>Non-UTF-8 <code>.sql</code> → rejected.</label></li>
+    <li class="item"><input type="checkbox"><label>Numeric ordering: <code>v1.9</code> before <code>v1.10</code> (not lexical).</label></li>
+    <li class="item"><input type="checkbox"><label>Version gaps allowed (v1.0, v1.2, v1.5).</label></li>
+  </ul>
+
+  <h2>11. Exit codes</h2>
+  <ul data-section="exit">
+    <li class="item"><input type="checkbox"><label>Success (incl. "no pending") returns 0: <code>echo $?</code>.</label></li>
+    <li class="item"><input type="checkbox"><label>Any error returns 1 (bad usage, bad target, failed migration, blocked retry, connection failure, uninitialized status/history).</label></li>
+  </ul>
+
+  <h2>12. Color / output sanity</h2>
+  <ul data-section="colorsanity">
+    <li class="item"><input type="checkbox"><label>Piped output (<code>| cat</code>) has no stray escape codes.</label></li>
+    <li class="item"><input type="checkbox"><label><code>history</code> columns stay aligned with color on or off.</label></li>
+    <li class="item"><input type="checkbox"><label><code>NO_COLOR=1</code> disables color everywhere.</label></li>
+  </ul>
+
+  <h2>Notes / issues found</h2>
+  <textarea id="notes" placeholder="Jot down anything surprising as you go..."></textarea>
+
+  <h2>Cleanup</h2>
+  <pre><code>mysql -e "DROP DATABASE IF EXISTS demo;"
+mysql -e "DROP DATABASE IF EXISTS reporting;"   # if created
+rm -f migrations/demo/v1.4_will_fail.sql migrations/demo/v1.5_long_sleep.sql
+rm -f /tmp/mysqlmig-test.cnf</code></pre>
+
+  <footer>mysqlmig manual QA checklist. Progress and notes persist in this browser only.</footer>
+</div>
+
+<script>
+  var STORE_KEY = "mysqlmig_checklist_v1";
+  var NOTES_KEY = "mysqlmig_checklist_notes_v1";
+
+  // Give every checkbox a stable id based on its position so saved state maps back.
+  var boxes = Array.prototype.slice.call(document.querySelectorAll('li.item input[type=checkbox]'));
+  boxes.forEach(function (box, i) { box.dataset.key = "c" + i; });
+
+  function load() {
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch (e) {}
+    boxes.forEach(function (box) {
+      if (saved[box.dataset.key]) { box.checked = true; }
+      box.closest('li.item').classList.toggle('checked', box.checked);
+    });
+    var notes = localStorage.getItem(NOTES_KEY);
+    if (notes !== null) { document.getElementById('notes').value = notes; }
+    updateProgress();
+  }
+
+  function save() {
+    var state = {};
+    boxes.forEach(function (box) { if (box.checked) state[box.dataset.key] = 1; });
+    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  }
+
+  function updateProgress() {
+    var done = boxes.filter(function (b) { return b.checked; }).length;
+    var total = boxes.length;
+    document.getElementById('count').textContent = done + " / " + total;
+    document.getElementById('barFill').style.width = total ? (100 * done / total) + "%" : "0";
+  }
+
+  boxes.forEach(function (box) {
+    box.addEventListener('change', function () {
+      box.closest('li.item').classList.toggle('checked', box.checked);
+      save();
+      updateProgress();
+    });
+  });
+
+  document.getElementById('notes').addEventListener('input', function () {
+    localStorage.setItem(NOTES_KEY, this.value);
+  });
+
+  document.getElementById('resetBtn').addEventListener('click', function () {
+    if (!confirm("Uncheck all items? (Notes are kept.)")) return;
+    boxes.forEach(function (box) {
+      box.checked = false;
+      box.closest('li.item').classList.remove('checked');
+    });
+    save();
+    updateProgress();
+  });
+
+  load();
+</script>
+</body>
+</html>

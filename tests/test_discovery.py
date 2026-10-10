@@ -60,6 +60,19 @@ def test_missing_directory(tmp_path):
         discover_migrations(str(tmp_path / "does_not_exist"))
 
 
+def test_unreadable_directory_raises_clean_error(tmp_path, monkeypatch):
+    # Simulate a permission error from listing the directory; it should surface
+    # as MigrationDiscoveryError, not a raw OSError/traceback.
+    import mysqlmig
+
+    def boom(path):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(mysqlmig.os, "listdir", boom)
+    with pytest.raises(MigrationDiscoveryError):
+        discover_migrations(str(tmp_path))
+
+
 def test_discovery_ignores_non_migration_files(tmp_path):
     _write(tmp_path, "v1.0_initial.sql", "v1.1_add_users.sql",
            "README.md", "notes.txt")

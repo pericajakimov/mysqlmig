@@ -258,8 +258,10 @@ A blocking migration therefore represents a pending migration that has already b
 
 A migration record whose `status` is not `SUCCESS` is a blocking state. There are two such states:
 
-* `FAILED` — the migration ran and the `mysql` client reported an error.
-* `IN_PROGRESS` — the migration was started but `mysqlmig` was interrupted before it could record a final result (for example, the process was killed or the connection was lost).
+* `FAILED` — the migration ran and the `mysql` client reported an error. This includes the case where the server aborts the running statement (for example, `KILL QUERY` from another session): the client returns a non-zero status, so the migration is recorded `FAILED`.
+* `IN_PROGRESS` — the migration was started but `mysqlmig` was interrupted before it could record a final result (for example, `mysqlmig` itself was killed with Ctrl-C, or the connection was lost). The record is left `IN_PROGRESS` because no final status was ever written.
+
+The distinction is intentional: a server-aborted query is a completed-with-error execution (`FAILED`), whereas killing `mysqlmig` mid-run leaves the outcome unknown (`IN_PROGRESS`).
 
 Failed migrations are recorded in `schema_version` intentionally: the history table should let a DBA see that a migration was attempted without inspecting log files. An `IN_PROGRESS` record left behind by an interrupted run serves the same purpose for migrations that may never have completed.
 
@@ -301,13 +303,14 @@ When `run` encounters a blocking migration, it must not silently execute it agai
 
 Interactive execution must warn the DBA and ask for explicit confirmation before retrying.
 
+The warning names the record's actual status.
+
 For a failed migration:
 
 ```text
-WARNING: Migration v1.2_cleanup.sql previously failed.
-The migration may have partially changed the database.
+Migration v1.2_cleanup.sql is in state FAILED.
 
-Make sure the database is in a safe state before retrying.
+The migration may have partially changed the database.
 
 Retry this migration? [y/N]:
 ```
@@ -315,13 +318,16 @@ Retry this migration? [y/N]:
 For an interrupted (in-progress) migration:
 
 ```text
-WARNING: Migration v1.2_cleanup.sql was interrupted and did not finish.
-It is unknown how much of the migration was applied.
+Migration v1.2_cleanup.sql is in state IN_PROGRESS.
+It was interrupted and may not have finished.
 
-Make sure the database is in a safe state before retrying.
+The migration may have partially changed the database.
 
 Retry this migration? [y/N]:
 ```
+
+In non-interactive mode the same condition is an error (naming the status, e.g.
+"Migration v1.2_cleanup.sql is in state FAILED.") and execution stops.
 
 If the DBA does not confirm, execution stops.
 
@@ -465,10 +471,33 @@ mysqlmig [GLOBAL OPTIONS] COMMAND [COMMAND OPTIONS]
 Commands:
 
 ```text
+init
 history
 status
 run
 ```
+
+### init
+
+Creates the metadata objects (`schema_version` and `v_schema_version`) in the
+target database.
+
+```bash
+mysqlmig init
+```
+
+`init` does **not** create the database. The target database must already exist
+and be accessible to the connecting user — in production, migrations typically
+run as a dedicated user that does not hold the `CREATE DATABASE` privilege, so
+database provisioning is left to the DBA. If the database is missing or
+inaccessible, the `mysql` client reports the error (e.g. `Unknown database`) and
+`init` stops with a non-zero exit.
+
+Table and view creation uses `CREATE TABLE/VIEW IF NOT EXISTS`, so `init` is
+idempotent. Running it on an already-initialized database succeeds (exit `0`)
+and reports a warning that the objects are already present. (This is detected
+from the server's "table already exists" note, surfaced via the client's
+`--show-warnings`, rather than a prior existence check.)
 
 ### history
 
@@ -512,17 +541,14 @@ A specific target can be supplied:
 mysqlmig run --to v1.7
 ```
 
-A dry run can be requested:
-
-```bash
-mysqlmig run --dry-run
-```
-
 Verbose output can be requested:
 
 ```bash
 mysqlmig run --verbose
 ```
+
+To preview what a run would do without executing anything, use `status`, which
+reports the current version, target, and the pending migrations.
 
 ### Pending Migrations
 
@@ -621,22 +647,22 @@ Example:
 ```text
 MySQL Migration Tool v1.0.0
 
+Host:     db-prod.example.com
 Database: application
-Current:  v1.6
-Latest:   v1.9
 
 What would you like to do?
 
-  1. Status
-  2. History
-  3. Run migrations
-  4. Help
-  5. Exit
+  1. Initialize database
+  2. Status
+  3. History
+  4. Run migrations
+  5. Help
+  6. Exit
 
 Select:
 ```
 
-The menu provides access to the same `status`, `history`, and `run` operations available through explicit commands. The header always shows the tool version. Choosing Help prints the help text and then redisplays the menu.
+The menu provides access to the same `init`, `status`, `history`, and `run` operations available through explicit commands. The header always shows the tool version, the host, and the database. Choosing Help prints the help text and then redisplays the menu.
 
 Interactive `run` may ask for confirmation before executing migrations and before retrying a blocking migration (`FAILED` or `IN_PROGRESS`).
 
@@ -666,31 +692,32 @@ Because a command selects non-interactive mode, a command-driven `run` that woul
 
 ---
 
-## 10. Dry Run
+## 10. Previewing a Run
 
-`--dry-run` applies to `run`:
+`mysqlmig` does not have a separate dry-run flag. The `status` command already
+shows the current version, the target, and the pending migrations without
+changing anything, so it serves as the preview of what a `run` would do.
 
 ```bash
-mysqlmig run --dry-run
+mysqlmig status
 ```
-
-It calculates and displays the migration plan without executing migrations or modifying migration state. No migration SQL is executed and no history records are created or modified.
 
 Example:
 
 ```text
-Current: v1.4
-Target:  v1.7
+Database: application
+Current:  v1.4
+Target:   v1.7
+Latest:   v1.7
 
 Pending migrations:
   v1.5_add_index.sql
   v1.6_new_table.sql
   v1.7_cleanup.sql
-
-Dry run: no migrations executed.
 ```
 
-Dry run does not change interactive/non-interactive behavior.
+Being read-only, `status` executes no migration SQL and creates or modifies no
+history records.
 
 ---
 
@@ -710,11 +737,13 @@ Executing: v1.6_add_column.sql
   SUCCESS (00:00:01.800)
 ```
 
-With `--verbose`:
+With `--verbose`, each migration's captured client output is shown as a clearly
+delimited block: a bold "Executing: <file>" header followed by a separator rule
+before and after the output, so successive scripts are easy to tell apart.
 
 ```text
 Executing: v1.5_add_index.sql
-
+------------------------------------------------------------
 --------------
 ALTER TABLE orders ADD INDEX idx_status (status)
 --------------
@@ -722,7 +751,8 @@ ALTER TABLE orders ADD INDEX idx_status (status)
 Query OK, 0 rows affected (2.31 sec)
 Records: 0  Duplicates: 0  Warnings: 0
 
-SUCCESS (00:00:03.200)
+------------------------------------------------------------
+  SUCCESS
 ```
 
 The full output is captured in both cases. `--verbose` affects display only; it does not change SQL execution, MySQL client verbosity, or the contents of `execution_log`.
@@ -758,6 +788,15 @@ mysqlmig --defaults-file=/etc/mysqlmig.cnf status
 ```
 
 Here `/etc/mysqlmig.cnf` is the only option file consulted — by `mysqlmig` for `[mysqlmig]` and by the `mysql` client for connection settings. If a setting the DBA relies on normally lives in `~/.my.cnf`, it must be present in this file too, because `--defaults-file` suppresses the default set.
+
+A note on `--defaults-extra-file` precedence: this follows standard MySQL
+client behavior. The extra file is read *before* the standard files (such as
+`~/.my.cnf`), and when the same option appears in more than one file the
+later-read file wins. So a value in `~/.my.cnf` overrides the same value in a
+`--defaults-extra-file`. `--defaults-extra-file` therefore adds settings that
+aren't otherwise present rather than overriding the standard files; use
+`--defaults-file` when you need a single authoritative source. `mysqlmig` does
+not change this ordering — it only forwards the flags to the client.
 
 ### [mysqlmig]
 
@@ -846,11 +885,10 @@ The following are `run`-only options, also interpreted by `mysqlmig`:
 
 ```text
 --to (-t)
---dry-run
 --verbose (-v)
 ```
 
-`--to`, `--dry-run`, and `--verbose` are only valid with the `run` command. Supplying them with `status` or `history` is a command-line usage error.
+`--to` and `--verbose` are only valid with the `run` command. Supplying them with another command, or with no command at all, is a command-line usage error (mysqlmig reports it rather than falling into interactive mode).
 
 The `--db` option is interpreted by `mysqlmig` because the database name is part of migration state and is used when determining the default migration directory. It is aligned with the MySQL client's `-D` database option, and `mysqlmig` passes the corresponding database option through to each `mysql` invocation.
 
@@ -1151,6 +1189,10 @@ ID  VERSION  SCRIPT                  STATUS       EXECUTION START       TIME
 3   v1.2     v1.2_add_indexes.sql   IN_PROGRESS  2026-10-07 18:00:08  -
 ```
 
+History column widths are sized to the data and adapt to the terminal width.
+The `SCRIPT` column (filenames can be long) is truncated with a trailing `...`
+when there is not enough room, so the table always stays aligned.
+
 `status` provides a higher-level summary intended for quickly determining whether the database requires migration.
 
 ---
@@ -1324,6 +1366,17 @@ Each metadata operation and each migration runs through its own short-lived `mys
 
 ## 26. Overall Execution Flow
 
+### init
+
+```text
+mysqlmig init
+      │
+      ├── load configuration
+      ├── connect to MySQL (database must already exist; else error + exit 1)
+      ├── create schema_version + v_schema_version   (IF NOT EXISTS, idempotent)
+      └── report initialized / already initialized (via --show-warnings)
+```
+
 ### history
 
 ```text
@@ -1360,7 +1413,6 @@ mysqlmig run
       ├── inspect migration state
       ├── validate target and repository consistency
       ├── retry blocking migration (FAILED or IN_PROGRESS) if confirmed
-      ├── if dry-run → show plan and exit
       └── execute pending migrations
             ├── insert IN_PROGRESS record (new mysql connection)
             ├── run migration SQL (separate mysql process)
@@ -1403,10 +1455,10 @@ Run to a specific version:
 mysqlmig run --to v1.7
 ```
 
-Dry run:
+Initialize the database and metadata:
 
 ```bash
-mysqlmig run --dry-run
+mysqlmig init
 ```
 
 Verbose:
@@ -1529,7 +1581,6 @@ mysqlmig run
 * blocking migration state (`FAILED` and `IN_PROGRESS`)
 * interactive retry confirmation
 * IN_PROGRESS-based concurrency protection
-* dry run
 * verbose output
 
 ### Phase 3 — Configuration and CLI
@@ -1594,8 +1645,9 @@ The implementation is complete when:
 * `run` executes migrations.
 * Interactive mode provides a menu.
 * Non-interactive mode requires an explicit command.
-* `run --dry-run` does not execute migrations.
+* `init` creates the database (if needed) and the metadata, idempotently.
 * `run --to VERSION` supports a specific target.
+* `status` previews pending migrations without executing anything.
 
 ### Concurrency
 
@@ -1648,7 +1700,6 @@ Global:
 
 ```text
 --to VERSION|latest (-t)
---dry-run
 --verbose (-v)
 ```
 

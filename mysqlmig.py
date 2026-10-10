@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import ClassVar
 
 __version__ = "0.1.0"
 
@@ -64,7 +65,7 @@ class Version:
     while comparing numerically by component so that v1.9 < v1.10.
     """
 
-    __slots__ = ("raw", "has_prefix", "components")
+    __slots__ = ("components", "has_prefix", "raw")
 
     def __init__(self, raw):
         match = _VERSION_RE.match(raw)
@@ -81,9 +82,6 @@ class Version:
     # that resolve to the same numeric components are equal even if written
     # differently (e.g. "v1.10" and "1.10"); this is what makes them a
     # duplicate within a single migration directory.
-
-    def _cmp_key(self):
-        return self.components
 
     def __eq__(self, other):
         if not isinstance(other, Version):
@@ -123,7 +121,7 @@ class Version:
 class Migration:
     """A single migration file discovered on disk."""
 
-    __slots__ = ("version", "description", "filename", "path")
+    __slots__ = ("description", "filename", "path", "version")
 
     def __init__(self, version, description, filename, path):
         self.version = version
@@ -167,8 +165,16 @@ def discover_migrations(directory):
             f"Migration directory {directory!r} does not exist."
         )
 
+    try:
+        entries = sorted(os.listdir(directory))
+    except OSError as exc:
+        raise MigrationDiscoveryError(
+            f"Cannot read migration directory {directory!r}: "
+            f"{exc.strerror or exc}"
+        ) from exc
+
     migrations = []
-    for entry in sorted(os.listdir(directory)):
+    for entry in entries:
         full = os.path.join(directory, entry)
         if not os.path.isfile(full):
             continue
@@ -237,13 +243,13 @@ class ConnectionConfig:
     """
 
     __slots__ = (
-        "defaults_file",
+        "database",
         "defaults_extra_file",
+        "defaults_file",
         "host",
+        "login_path",
         "port",
         "user",
-        "login_path",
-        "database",
     )
 
     def __init__(
@@ -273,8 +279,8 @@ class ConnectionConfig:
             args.append("--defaults-extra-file=" + self.defaults_extra_file)
         return args
 
-    def connection_args(self, include_database=True):
-        """Connection args (host/port/user/login-path and optionally database)."""
+    def connection_args(self):
+        """Connection args (host/port/user/login-path and the database)."""
         args = []
         if self.login_path is not None:
             args.append("--login-path=" + self.login_path)
@@ -284,7 +290,7 @@ class ConnectionConfig:
             args.append("--port=" + str(self.port))
         if self.user is not None:
             args.append("--user=" + self.user)
-        if include_database and self.database is not None:
+        if self.database is not None:
             args.append("--database=" + self.database)
         return args
 
@@ -292,7 +298,7 @@ class ConnectionConfig:
 class MysqlResult:
     """Result of running the mysql client once."""
 
-    __slots__ = ("returncode", "output")
+    __slots__ = ("output", "returncode")
 
     def __init__(self, returncode, output):
         self.returncode = returncode
@@ -325,12 +331,12 @@ class MysqlClient:
 
     def _migration_command(self):
         """mysql invocation used to run a migration file via stdin."""
-        return (
-            [self.mysql_path]
-            + self.config.option_file_args()
-            + self.config.connection_args(include_database=True)
-            + list(_FIXED_MIGRATION_OPTIONS)
-        )
+        return [
+            self.mysql_path,
+            *self.config.option_file_args(),
+            *self.config.connection_args(),
+            *_FIXED_MIGRATION_OPTIONS,
+        ]
 
     def _metadata_command(self, extra_options):
         """mysql invocation used for service/metadata SQL via stdin.
@@ -339,12 +345,12 @@ class MysqlClient:
         easy to parse. extra_options lets callers tune output (e.g. whether to
         include column headers).
         """
-        return (
-            [self.mysql_path]
-            + self.config.option_file_args()
-            + self.config.connection_args(include_database=True)
-            + list(extra_options)
-        )
+        return [
+            self.mysql_path,
+            *self.config.option_file_args(),
+            *self.config.connection_args(),
+            *extra_options,
+        ]
 
     # -- execution -----------------------------------------------------------
 
@@ -364,14 +370,20 @@ class MysqlClient:
         )
         return MysqlResult(proc.returncode, proc.stdout)
 
-    def execute(self, sql_text):
+    def execute(self, sql_text, show_warnings=False):
         """Execute metadata SQL that returns no rows (DDL, INSERT/UPDATE).
 
-        Raises MysqlClientError on a non-zero exit, surfacing the client output.
+        With show_warnings=True, the client is run with --show-warnings so
+        server notes/warnings (e.g. "Table already exists") appear in the
+        returned output. Raises MysqlClientError on a non-zero exit, surfacing
+        the client output. Returns the combined stdout+stderr.
         """
         self._require_client()
+        options = ["--batch"]
+        if show_warnings:
+            options.append("--show-warnings")
         proc = subprocess.run(
-            self._metadata_command(["--batch"]),
+            self._metadata_command(options),
             input=sql_text,
             capture_output=True,
             text=True,
@@ -380,7 +392,8 @@ class MysqlClient:
             raise MysqlClientError(
                 "mysql command failed:\n" + (proc.stderr or proc.stdout).strip()
             )
-        return proc.stdout
+        # Warnings are printed to stderr by the client; include both streams.
+        return (proc.stdout or "") + (proc.stderr or "")
 
     def query(self, sql_text):
         """Run a SELECT and return parsed rows.
@@ -514,9 +527,22 @@ class Metadata:
         return bool(rows) and rows[0][0] != "0"
 
     def create(self):
-        """Create the table and view. Idempotent."""
-        self.client.execute(_CREATE_TABLE_SQL)
+        """Create the table and view in the target database (idempotent).
+
+        The database itself is NOT created; it must already exist and be
+        accessible to the connecting user (a dedicated migration user typically
+        lacks CREATE DATABASE). If the database is missing or inaccessible, the
+        underlying mysql client errors and MysqlClientError propagates.
+
+        Returns True if the schema_version table already existed (detected via
+        the server's "table already exists" note under --show-warnings),
+        False if it was created now.
+        """
+        table_output = self.client.execute(_CREATE_TABLE_SQL, show_warnings=True)
         self.client.execute(_CREATE_VIEW_SQL)
+        # MySQL emits Note 1050 "Table '...' already exists" for
+        # CREATE TABLE IF NOT EXISTS when the table is already present.
+        return "1050" in table_output or "already exists" in table_output.lower()
 
     # -- reads ---------------------------------------------------------------
 
@@ -528,16 +554,6 @@ class Metadata:
             "FROM schema_version ORDER BY id;"
         )
         return [MigrationRecord.from_row(row) for row in rows]
-
-    def get_log(self, version):
-        """Return the current execution_log for a version, or None."""
-        rows = self.client.query(
-            f"SELECT execution_log FROM schema_version WHERE version = {_sql_quote(version)};"
-        )
-        if not rows:
-            return None
-        value = rows[0][0]
-        return None if value == "NULL" else value
 
     # -- writes --------------------------------------------------------------
 
@@ -594,12 +610,12 @@ class MigrationRecord:
     """One row of schema_version (without the large execution_log)."""
 
     __slots__ = (
-        "id",
-        "version",
-        "script_name",
-        "status",
         "execution_start",
         "execution_time",
+        "id",
+        "script_name",
+        "status",
+        "version",
     )
 
     def __init__(self, id, version, script_name, status,
@@ -791,16 +807,14 @@ class MigrationState:
 class Config:
     """Resolved mysqlmig settings after merging CLI, option files, defaults."""
 
-    __slots__ = ("database", "directory", "connection", "target",
-                 "dry_run", "verbose")
+    __slots__ = ("connection", "database", "directory", "target", "verbose")
 
     def __init__(self, database, directory, connection,
-                 target=None, dry_run=False, verbose=False):
+                 target=None, verbose=False):
         self.database = database
         self.directory = directory
         self.connection = connection
         self.target = target
-        self.dry_run = dry_run
         self.verbose = verbose
 
 
@@ -814,7 +828,7 @@ def _read_option_group(group_name, option_file_args):
     """
     if shutil.which("my_print_defaults") is None:
         return {}
-    cmd = ["my_print_defaults"] + list(option_file_args) + [group_name]
+    cmd = ["my_print_defaults", *option_file_args, group_name]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except OSError:
@@ -852,7 +866,7 @@ def _host_from_print_defaults(option_file_args, mysql_path="mysql"):
     if shutil.which(mysql_path) is None:
         return None
     # Option-file flags must precede --print-defaults.
-    cmd = [mysql_path] + list(option_file_args) + ["--print-defaults"]
+    cmd = [mysql_path, *option_file_args, "--print-defaults"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except OSError:
@@ -931,7 +945,7 @@ class Color:
     (e.g. in tests) via enabled=.
     """
 
-    _CODES = {
+    _CODES: ClassVar[dict] = {
         "reset": "\033[0m",
         "bold": "\033[1m",
         "red": "\033[31m",
@@ -998,6 +1012,13 @@ class Color:
     def heading(self, text):
         return self._wrap(str(text), "bold")
 
+    def heading_white(self, text):
+        return self._wrap(str(text), "bold", "white")
+
+    def rule(self, width=60, char="-"):
+        """A horizontal separator line (bold when color is enabled)."""
+        return self._wrap(char * width, "bold")
+
     def status(self, status_value, text=None):
         """Color a status by its meaning.
 
@@ -1057,8 +1078,10 @@ class Runner:
     def _require_initialized(self):
         if not self.metadata.exists():
             raise MysqlmigError(
-                f"{METADATA_TABLE} does not exist in database '{self.config.database}'.\n"
-                "The database has not been initialized by mysqlmig."
+                f"{METADATA_TABLE} does not exist in database "
+                f"'{self.config.database}'.\n"
+                "The database has not been initialized by mysqlmig. "
+                "Run 'mysqlmig init' first."
             )
 
     def _load_state(self):
@@ -1073,6 +1096,30 @@ class Runner:
         except EOFError:
             return False
         return answer in ("y", "yes")
+
+    # -- init ----------------------------------------------------------------
+
+    def init(self):
+        """Create the metadata objects (schema_version table + view).
+
+        The target database must already exist and be accessible; mysqlmig does
+        not create it (a dedicated migration user typically lacks CREATE
+        DATABASE privilege). If the database is missing or inaccessible, the
+        mysql client reports the error and init stops with a non-zero exit.
+
+        Creation is idempotent (CREATE TABLE/VIEW IF NOT EXISTS). Running init
+        on an already-initialized database succeeds and reports a warning.
+        """
+        already = self.metadata.create()
+        _print(f"Database: {COLOR.database(self.config.database)}")
+        if already:
+            _print(COLOR.warning(
+                "Already initialized: schema_version and v_schema_version "
+                "are already present."))
+        else:
+            _print(COLOR.success(
+                "Initialized: created schema_version and v_schema_version."))
+        return 0
 
     # -- status --------------------------------------------------------------
 
@@ -1124,23 +1171,56 @@ class Runner:
         if not records:
             _print("No migrations recorded.")
             return 0
-        header = "{:<4} {:<10} {:<28} {:<12} {:<26} {}".format(
-            "ID", "VERSION", "SCRIPT", "STATUS", "EXECUTION START", "TIME")
-        _print(COLOR.heading(header))
-        for r in records:
-            # Pad each cell to its column width BEFORE coloring, so the ANSI
-            # escape sequences do not throw off column alignment.
-            version_cell = COLOR.version(f"{str(r.version):<10}")
-            script_cell = COLOR.script(f"{r.script_name:<28}")
-            status_cell = COLOR.status(r.status, f"{r.status:<12}")
-            _print("{:<4} {} {} {} {:<26} {}".format(
-                r.id,
-                version_cell,
-                script_cell,
-                status_cell,
+
+        rows = [
+            (
+                str(r.id),
+                str(r.version),
+                r.script_name,
+                r.status,
                 r.execution_start,
                 r.execution_time if r.execution_time else "-",
-            ))
+            )
+            for r in records
+        ]
+
+        # Column widths size to the data, but SCRIPT is capped so a very long
+        # filename cannot break the layout; it is truncated with an ellipsis
+        # to fit the terminal width.
+        headers = ("ID", "VERSION", "SCRIPT", "STATUS", "EXECUTION START", "TIME")
+        w_id = max(len(headers[0]), *(len(r[0]) for r in rows))
+        w_ver = max(len(headers[1]), *(len(r[1]) for r in rows))
+        w_status = max(len(headers[3]), *(len(r[3]) for r in rows))
+        w_start = max(len(headers[4]), *(len(r[4]) for r in rows))
+        w_time = max(len(headers[5]), *(len(r[5]) for r in rows))
+        w_script_data = max(len(headers[2]), *(len(r[2]) for r in rows))
+
+        # Space the fixed columns consume, plus 5 single-space gaps.
+        fixed = w_id + w_ver + w_status + w_start + w_time + 5
+        try:
+            term_width = shutil.get_terminal_size((100, 24)).columns
+        except OSError:
+            term_width = 100
+        # SCRIPT gets whatever is left, within sane bounds.
+        avail = term_width - fixed
+        w_script = max(10, min(w_script_data, avail))
+
+        def fit(text, width):
+            if len(text) <= width:
+                return text
+            if width <= 3:
+                return text[:width]
+            return text[: width - 3] + "..."  # ASCII ellipsis, locale-safe
+
+        header = f"{headers[0].ljust(w_id)} {headers[1].ljust(w_ver)} {headers[2].ljust(w_script)} {headers[3].ljust(w_status)} {headers[4].ljust(w_start)} {headers[5]}"
+        _print(COLOR.heading(header))
+        for rid, ver, script, status, start, tm in rows:
+            # Pad each cell to its column width BEFORE coloring, so the ANSI
+            # escape sequences do not throw off column alignment.
+            ver_cell = COLOR.version(ver.ljust(w_ver))
+            script_cell = COLOR.script(fit(script, w_script).ljust(w_script))
+            status_cell = COLOR.status(status, status.ljust(w_status))
+            _print(f"{rid.ljust(w_id)} {ver_cell} {script_cell} {status_cell} {start.ljust(w_start)} {tm}")
         return 0
 
     # -- run -----------------------------------------------------------------
@@ -1181,9 +1261,6 @@ class Runner:
             _print("No pending migrations.")
             return 0
 
-        if self.config.dry_run:
-            return self._show_dry_run(state, pending, target)
-
         for migration in pending:
             if not self._execute_one(migration, retry=False):
                 return 1
@@ -1204,19 +1281,17 @@ class Runner:
 
         if not self.interactive:
             raise MysqlmigError(
-                "Migration {} previously {}.\n"
+                f"Migration {migration.filename} is in state "
+                f"{blocking.status}.\n"
                 "The migration may have partially changed the database.\n"
-                "An interactive terminal is required to confirm the retry.".format(
-                    migration.filename, blocking.status.lower().replace("_", " ")
-                )
+                "An interactive terminal is required to confirm the retry."
             )
 
-        if blocking.status == STATUS_FAILED:
-            _print(COLOR.warning("Previous migration failed:"))
-        else:
-            _print(COLOR.warning("Previous migration did not finish:"))
-        _print()
-        _print(f"  {migration.filename}")
+        _print(COLOR.warning(
+            f"Migration {migration.filename} is in state {blocking.status}."))
+        if blocking.status == STATUS_IN_PROGRESS:
+            _print(COLOR.warning(
+                "It was interrupted and may not have finished."))
         _print()
         _print(COLOR.warning(
             "The migration may have partially changed the database."))
@@ -1238,7 +1313,15 @@ class Runner:
             self.metadata.insert_in_progress(
                 str(migration.version), migration.filename)
 
-        _print(f"Executing: {migration.filename}")
+        # In verbose mode, make each script's output a clearly delimited block
+        # with a bold-white header, so successive scripts are easy to tell apart.
+        if self.config.verbose:
+            _print()
+            _print(COLOR.heading_white(f"Executing: {migration.filename}"))
+            _print(COLOR.rule())
+        else:
+            _print(f"Executing: {migration.filename}")
+
         result = self.client.run_migration(sql_text)
 
         status = STATUS_SUCCESS if result.ok else STATUS_FAILED
@@ -1246,33 +1329,19 @@ class Runner:
             str(migration.version), status, result.output, append=retry)
 
         if self.config.verbose:
-            _print()
             _print(result.output.rstrip("\n"))
-            _print()
+            _print(COLOR.rule())
 
         if result.ok:
-            _print("  {}".format(COLOR.success("SUCCESS")))
+            _print(f"  {COLOR.success('SUCCESS')}")
             return True
 
-        _print("  {}".format(COLOR.failure("FAILED")))
+        _print(f"  {COLOR.failure('FAILED')}")
         _print()
         _eprint(COLOR.failure(f"Migration failed: {migration.filename}"))
         if not self.config.verbose:
             _eprint(result.output.rstrip("\n"))
         return False
-
-    def _show_dry_run(self, state, pending, target):
-        current = state.current_version()
-        _print("Current: {}".format(
-            COLOR.version(current) if current else "(none)"))
-        _print(f"Target:  {COLOR.version(target)}")
-        _print()
-        _print("Pending migrations:")
-        for migration in pending:
-            _print(f"  {COLOR.pending(migration.filename)}")
-        _print()
-        _print(COLOR.warning("Dry run: no migrations executed."))
-        return 0
 
 
 def _read_migration_sql(path):
@@ -1301,13 +1370,13 @@ Usage:
   mysqlmig [COMMAND] [OPTIONS]
 
 Commands:
+  init                       Create the metadata in an existing database
   status                     Show current migration state
   history                    Show migration history
   run                        Execute pending migrations
 
 Run options:
   -t, --to VERSION|latest    Target version (default: latest)
-      --dry-run              Show the plan without executing
   -v, --verbose              Show full mysql client output
 
 Global options:
@@ -1328,7 +1397,7 @@ Options may be given before or after the command.
 Running mysqlmig with no command opens the interactive menu.\
 """
 
-_HELP_COMMANDS = ("status", "history", "run")
+_HELP_COMMANDS = ("init", "status", "history", "run")
 
 
 def render_help():
@@ -1411,11 +1480,12 @@ class InteractiveMenu:
         self._output()
         self._output("What would you like to do?")
         self._output()
-        self._output("  1. Status")
-        self._output("  2. History")
-        self._output("  3. Run migrations")
-        self._output("  4. Help")
-        self._output("  5. Exit")
+        self._output("  1. Initialize database")
+        self._output("  2. Status")
+        self._output("  3. History")
+        self._output("  4. Run migrations")
+        self._output("  5. Help")
+        self._output("  6. Exit")
         self._output()
 
     def run(self):
@@ -1430,16 +1500,18 @@ class InteractiveMenu:
                 return 0
 
             if choice == "1":
-                self._safe(self.runner.status)
+                self._safe(self.runner.init)
             elif choice == "2":
-                self._safe(self.runner.history)
+                self._safe(self.runner.status)
             elif choice == "3":
-                self._safe(self._run_with_prompt)
+                self._safe(self.runner.history)
             elif choice == "4":
+                self._safe(self._run_with_prompt)
+            elif choice == "5":
                 self._output()
                 self._output(render_help())
                 self._separator()
-            elif choice == "5" or choice.lower() in ("exit", "quit", "q"):
+            elif choice == "6" or choice.lower() in ("exit", "quit", "q"):
                 return 0
             else:
                 self._output(f"Invalid choice: {choice!r}")
@@ -1541,8 +1613,6 @@ def _add_run_options(parser):
     """Add the run-only options to a parser (also SUPPRESS defaults)."""
     parser.add_argument("-t", "--to", dest="to", metavar="VERSION|latest",
                         default=argparse.SUPPRESS)
-    parser.add_argument("--dry-run", dest="dry_run", action="store_true",
-                        default=argparse.SUPPRESS)
     parser.add_argument("-v", "--verbose", dest="verbose", action="store_true",
                         default=argparse.SUPPRESS)
 
@@ -1568,6 +1638,8 @@ def build_parser():
     # add_help=False on subparsers because -h is --host, not help; help is
     # handled in main() via render_help().
     sub = parser.add_subparsers(dest="command")
+    sub.add_parser("init", parents=[global_parent], add_help=False,
+                   help="Create the database (if needed) and metadata")
     sub.add_parser("status", parents=[global_parent], add_help=False,
                    help="Show current migration state")
     sub.add_parser("history", parents=[global_parent], add_help=False,
@@ -1636,7 +1708,6 @@ def _resolve_config(args, group_reader=None):
         directory=directory,
         connection=connection,
         target=getattr(args, "to", None),
-        dry_run=getattr(args, "dry_run", False),
         verbose=getattr(args, "verbose", False),
     )
 
@@ -1663,6 +1734,16 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # Run-only options are meaningless without the `run` command; reject them
+    # instead of silently falling into interactive mode.
+    if args.command is None:
+        for opt_attr, opt_name in (("to", "--to"), ("verbose", "--verbose")):
+            if getattr(args, opt_attr, None) not in (None, False):
+                _eprint(COLOR.failure(
+                    f"ERROR: {opt_name} can only be used with the "
+                    "'run' command."))
+                return 1
+
     try:
         config = _resolve_config(args)
 
@@ -1672,6 +1753,8 @@ def main(argv=None):
             return InteractiveMenu(config).run()
 
         runner = Runner(config, interactive=False)
+        if args.command == "init":
+            return runner.init()
         if args.command == "status":
             return runner.status()
         if args.command == "history":
