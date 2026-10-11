@@ -1,5 +1,7 @@
 """Unit tests for CLI parsing: option/command ordering and help rendering."""
 
+import pytest
+
 from mysqlmig import build_parser, render_help
 
 
@@ -44,6 +46,49 @@ def test_h_is_host_not_help():
     assert _get(ns, "host") == "db-host"
 
 
+# -- password option (-p / --password), pre-extracted from argv ------------
+
+def test_bare_p_is_prompt_sentinel():
+    import mysqlmig
+    rem, pw = mysqlmig._extract_password_arg(["status", "-p"])
+    assert rem == ["status"]
+    assert pw is mysqlmig._PROMPT_PASSWORD
+
+
+def test_long_password_bare_is_prompt():
+    import mysqlmig
+    rem, pw = mysqlmig._extract_password_arg(["status", "--password"])
+    assert pw is mysqlmig._PROMPT_PASSWORD
+
+
+def test_password_equals_value():
+    import mysqlmig
+    rem, pw = mysqlmig._extract_password_arg(["run", "--password=secret", "-D", "demo"])
+    assert pw == "secret"
+    assert rem == ["run", "-D", "demo"]
+
+
+def test_password_attached_short_form():
+    import mysqlmig
+    _, pw = mysqlmig._extract_password_arg(["status", "-psecret"])
+    assert pw == "secret"
+
+
+def test_p_does_not_consume_following_command():
+    # `-p run` must prompt and keep `run` as the command (not eat it).
+    import mysqlmig
+    rem, pw = mysqlmig._extract_password_arg(["-p", "run"])
+    assert rem == ["run"]
+    assert pw is mysqlmig._PROMPT_PASSWORD
+
+
+def test_no_password_option():
+    import mysqlmig
+    rem, pw = mysqlmig._extract_password_arg(["status"])
+    assert pw is None
+    assert rem == ["status"]
+
+
 def test_no_command():
     ns = _parse([])
     assert ns.command is None
@@ -69,22 +114,56 @@ def test_long_and_short_db_equivalent():
 
 # -- help rendering ----------------------------------------------------------
 
-# -- run-only options require the run command --------------------------------
+# -- --to applies to status and run; --verbose to run only ------------------
+
+def test_to_with_status_after_command():
+    ns = _parse(["status", "--to", "v1.2"])
+    assert ns.command == "status"
+    assert _get(ns, "to") == "v1.2"
+
+
+def test_to_with_status_before_command():
+    ns = _parse(["--to", "v1.2", "status"])
+    assert ns.command == "status"
+    assert _get(ns, "to") == "v1.2"
+
 
 def test_to_without_command_errors(capsys):
     from mysqlmig import main
     rc = main(["--to", "v1.0"])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "--to" in err and "run" in err
+    # Now valid for both status and run, so the message names both.
+    assert "--to" in err and "run" in err and "status" in err
 
 
-def test_verbose_without_command_errors(capsys):
+def test_to_with_init_errors():
+    # init does not define --to on its subparser, so argparse rejects it
+    # (argparse exits via SystemExit for unrecognized arguments).
     from mysqlmig import main
-    rc = main(["--verbose"])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "--verbose" in err
+    with pytest.raises(SystemExit):
+        main(["init", "--to", "v1.0"])
+
+
+def test_to_with_history_errors():
+    from mysqlmig import main
+    with pytest.raises(SystemExit):
+        main(["history", "--to", "v1.0"])
+
+
+def test_verbose_with_status_errors():
+    # --verbose is run-only; status's subparser does not define it.
+    from mysqlmig import main
+    with pytest.raises(SystemExit):
+        main(["status", "--verbose"])
+
+
+def test_verbose_without_command_allowed_for_interactive():
+    # --verbose with no command is valid: it enables verbose output for an
+    # interactive run. The parser accepts it as a top-level flag.
+    ns = _parse(["--verbose"])
+    assert ns.command is None
+    assert _get(ns, "verbose") is True
 
 
 # -- help rendering ----------------------------------------------------------
@@ -92,7 +171,7 @@ def test_verbose_without_command_errors(capsys):
 def test_render_help_contains_sections():
     text = render_help()
     assert "Commands:" in text
-    assert "Run options:" in text
+    assert "Status/run options:" in text
     assert "Global options:" in text
     # Mentions that options can go before or after the command.
     assert "before or after" in text

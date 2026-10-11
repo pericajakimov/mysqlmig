@@ -14,7 +14,11 @@ import subprocess
 import sys
 from typing import ClassVar
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
+
+# Sentinel marking "prompt for the password" (bare -p / --password with no
+# value), distinct from an explicitly supplied --password=VALUE.
+_PROMPT_PASSWORD = object()
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +252,7 @@ class ConnectionConfig:
         "defaults_file",
         "host",
         "login_path",
+        "password",
         "port",
         "user",
     )
@@ -261,6 +266,7 @@ class ConnectionConfig:
         user=None,
         login_path=None,
         database=None,
+        password=None,
     ):
         self.defaults_file = defaults_file
         self.defaults_extra_file = defaults_extra_file
@@ -269,6 +275,13 @@ class ConnectionConfig:
         self.user = user
         self.login_path = login_path
         self.database = database
+        # Resolved password (from -p / --password or [mysqlmig] password), or
+        # None. When set it is passed as --password= on the mysql command line
+        # (see connection_args). This matches the mysql client: a command-line
+        # password overrides any password in an option file (e.g. ~/.my.cnf),
+        # whereas MYSQL_PWD would NOT. The tradeoff is that it is visible in
+        # `ps`, exactly as `mysql --password=` is.
+        self.password = password
 
     def option_file_args(self):
         """Args that MUST appear first on the mysql command line."""
@@ -280,7 +293,14 @@ class ConnectionConfig:
         return args
 
     def connection_args(self):
-        """Connection args (host/port/user/login-path and the database)."""
+        """Connection args (host/port/user/login-path, database, password).
+
+        When a password is set it is appended as --password=VALUE. This is
+        required for correct precedence: a command-line password overrides a
+        password in an option file (e.g. ~/.my.cnf), which MYSQL_PWD does not.
+        When no password is set, nothing is appended, so the mysql client's own
+        authentication (login path, option files) applies unchanged.
+        """
         args = []
         if self.login_path is not None:
             args.append("--login-path=" + self.login_path)
@@ -292,6 +312,8 @@ class ConnectionConfig:
             args.append("--user=" + self.user)
         if self.database is not None:
             args.append("--database=" + self.database)
+        if self.password is not None:
+            args.append("--password=" + self.password)
         return args
 
 
@@ -444,13 +466,13 @@ STATUS_FAILED = "FAILED"
 
 _CREATE_TABLE_SQL = """\
 CREATE TABLE IF NOT EXISTS schema_version (
-    id              INT UNSIGNED   NOT NULL AUTO_INCREMENT,
-    version         VARCHAR(32)    NOT NULL,
-    script_name     VARCHAR(255)   NOT NULL,
-    status          ENUM('IN_PROGRESS', 'SUCCESS', 'FAILED') NOT NULL,
-    execution_start TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    execution_time  VARCHAR(16)    NULL,
-    execution_log   LONGTEXT       NULL,
+    id                  INT UNSIGNED   NOT NULL AUTO_INCREMENT,
+    version             VARCHAR(32)    NOT NULL,
+    script_name         VARCHAR(255)   NOT NULL,
+    status              ENUM('IN_PROGRESS', 'SUCCESS', 'FAILED') NOT NULL,
+    execution_start     TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    execution_duration  VARCHAR(16)    NULL,
+    execution_log       LONGTEXT       NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_schema_version_version (version)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -464,7 +486,7 @@ SELECT
     script_name,
     status,
     execution_start,
-    execution_time
+    execution_duration
 FROM schema_version;
 """
 
@@ -482,7 +504,7 @@ FROM schema_version;
 #
 # Note: SEC_TO_TIME caps at the TIME range (838:59:59), which far exceeds any
 # realistic migration duration.
-_EXECUTION_TIME_EXPR = (
+_EXECUTION_DURATION_EXPR = (
     "LEFT("
     "TIME_FORMAT("
     "SEC_TO_TIME("
@@ -550,7 +572,7 @@ class Metadata:
         """Return all records ordered by id as a list of MigrationRecord."""
         rows = self.client.query(
             "SELECT id, version, script_name, status, "
-            "execution_start, execution_time "
+            "execution_start, execution_duration "
             "FROM schema_version ORDER BY id;"
         )
         return [MigrationRecord.from_row(row) for row in rows]
@@ -560,7 +582,7 @@ class Metadata:
     def insert_in_progress(self, version, script_name):
         """Insert a new IN_PROGRESS record for a migration about to run.
 
-        execution_start is populated by the database default; execution_time
+        execution_start is populated by the database default; execution_duration
         and execution_log are left NULL.
         """
         self.client.execute(
@@ -571,7 +593,7 @@ class Metadata:
     def reset_in_progress(self, version, script_name):
         """Reset an existing (blocking) record to IN_PROGRESS for a retry.
 
-        Resets execution_start to now and clears execution_time; the existing
+        Resets execution_start to now and clears execution_duration; the existing
         execution_log is preserved so the new attempt can be appended to it.
         """
         self.client.execute(
@@ -579,7 +601,7 @@ class Metadata:
             f"status = '{STATUS_IN_PROGRESS}', "
             f"script_name = {_sql_quote(script_name)}, "
             "execution_start = CURRENT_TIMESTAMP(3), "
-            "execution_time = NULL "
+            "execution_duration = NULL "
             f"WHERE version = {_sql_quote(version)};"
         )
 
@@ -601,7 +623,7 @@ class Metadata:
             "UPDATE schema_version SET "
             f"status = '{status}', "
             f"execution_log = {log_expr}, "
-            f"execution_time = {_EXECUTION_TIME_EXPR} "
+            f"execution_duration = {_EXECUTION_DURATION_EXPR} "
             f"WHERE version = {_sql_quote(version)};"
         )
 
@@ -610,8 +632,8 @@ class MigrationRecord:
     """One row of schema_version (without the large execution_log)."""
 
     __slots__ = (
+        "execution_duration",
         "execution_start",
-        "execution_time",
         "id",
         "script_name",
         "status",
@@ -619,27 +641,28 @@ class MigrationRecord:
     )
 
     def __init__(self, id, version, script_name, status,
-                 execution_start, execution_time):
+                 execution_start, execution_duration):
         self.id = id
         self.version = version
         self.script_name = script_name
         self.status = status
         self.execution_start = execution_start
-        self.execution_time = execution_time
+        self.execution_duration = execution_duration
 
     @classmethod
     def from_row(cls, row):
-        # row: [id, version, script_name, status, execution_start, execution_time]
-        execution_time = row[5]
-        if execution_time == "NULL":
-            execution_time = None
+        # row: [id, version, script_name, status, execution_start,
+        #       execution_duration]
+        execution_duration = row[5]
+        if execution_duration == "NULL":
+            execution_duration = None
         return cls(
             id=int(row[0]),
             version=Version(row[1]),
             script_name=row[2],
             status=row[3],
             execution_start=row[4],
-            execution_time=execution_time,
+            execution_duration=execution_duration,
         )
 
     @property
@@ -850,8 +873,85 @@ def _read_option_group(group_name, option_file_args):
 
 
 def _read_mysqlmig_group(option_file_args):
-    """Read the [mysqlmig] option group (db / dir / login-path)."""
-    return _read_option_group("mysqlmig", option_file_args)
+    """Read the [mysqlmig] option group (db / dir / host / port / user /
+    login-path).
+
+    NOTE: `my_print_defaults` masks password values as `*****`, so the
+    password is NOT read here; use _read_mysqlmig_password instead.
+
+    Unsupported keys are reported as a warning (not an error) so a DBA who,
+    say, puts `connect-timeout` in [mysqlmig] expecting it to be honored is
+    told it is ignored rather than being silently surprised.
+    """
+    group = _read_option_group("mysqlmig", option_file_args)
+    _warn_unknown_mysqlmig_keys(group)
+    return group
+
+
+# Keys mysqlmig understands in the [mysqlmig] option group. `password` is read
+# separately (my_print_defaults masks it) but is still a supported key.
+_SUPPORTED_MYSQLMIG_KEYS = frozenset({
+    "db", "dir", "host", "port", "user", "login-path", "password",
+})
+
+
+def _warn_unknown_mysqlmig_keys(group):
+    """Warn about keys in [mysqlmig] that mysqlmig does not understand.
+
+    Only mysqlmig's own options are consulted from this group; connection
+    options the mysql client reads (e.g. connect-timeout) belong in [client],
+    not [mysqlmig]. Warn so expectations are explicit; never fail.
+    """
+    unknown = sorted(k for k in group if k not in _SUPPORTED_MYSQLMIG_KEYS)
+    if not unknown:
+        return
+    keys = ", ".join(unknown)
+    _eprint(COLOR.warning(
+        f"WARNING: ignoring unsupported key(s) in [mysqlmig]: {keys}. "
+        f"Supported keys: {', '.join(sorted(_SUPPORTED_MYSQLMIG_KEYS))}. "
+        "Put mysql client options (e.g. connect-timeout) in [client]."))
+
+
+def _mysqlmig_password_files(defaults_file, defaults_extra_file):
+    """Option files to search for the [mysqlmig] password, in read order.
+
+    Mirrors the mysql client's file handling closely enough for this
+    last-resort setting:
+      * --defaults-file  -> only that file,
+      * otherwise        -> the usual default files, plus --defaults-extra-file.
+    The actual client resolves a longer search path; we cover the common ones.
+    """
+    if defaults_file:
+        return [defaults_file]
+    files = [
+        os.path.expanduser("~/.my.cnf"),
+        os.path.expanduser("~/.mylogin.cnf"),  # usually binary; ignored if unreadable
+    ]
+    if defaults_extra_file:
+        files.append(defaults_extra_file)
+    return files
+
+
+def _read_mysqlmig_password(defaults_file=None, defaults_extra_file=None):
+    """Read the [mysqlmig] password directly from the option file(s).
+
+    `my_print_defaults` masks passwords, so we parse the files ourselves with
+    configparser. Later files win (matching MySQL's "last value wins"). Returns
+    the password string or None. Parsing errors are ignored (best-effort).
+    """
+    import configparser
+
+    password = None
+    for path in _mysqlmig_password_files(defaults_file, defaults_extra_file):
+        try:
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            with open(path, encoding="utf-8") as handle:
+                parser.read_file(handle)
+        except (OSError, configparser.Error, UnicodeDecodeError):
+            continue
+        if parser.has_option("mysqlmig", "password"):
+            password = parser.get("mysqlmig", "password")
+    return password
 
 
 def _host_from_print_defaults(option_file_args, mysql_path="mysql"):
@@ -992,6 +1092,18 @@ class Color:
     def database(self, text):
         return self._wrap(str(text), "bold", "white")
 
+    # Status version lines use a distinct bold color each so the three values
+    # are easy to tell apart at a glance:
+    #   current -> bold yellow, target -> bold light blue, latest -> bold green
+    def current_version(self, text):
+        return self._wrap(str(text), "bold", "yellow")
+
+    def target_version(self, text):
+        return self._wrap(str(text), "bold", "bright_blue")
+
+    def latest_version(self, text):
+        return self._wrap(str(text), "bold", "green")
+
     def script(self, text):
         return self._wrap(str(text), "bright_blue")
 
@@ -1002,6 +1114,9 @@ class Color:
 
     def success(self, text):
         return self._wrap(str(text), "green")
+
+    def success_bold(self, text):
+        return self._wrap(str(text), "bold", "green")
 
     def failure(self, text):
         return self._wrap(str(text), "red")
@@ -1089,6 +1204,15 @@ class Runner:
         records = self.metadata.load_records()
         return MigrationState(migrations, records)
 
+    def check_directory(self):
+        """Validate the migration directory exists and is well-formed.
+
+        Raises MigrationDiscoveryError on a missing directory, duplicate
+        versions, or a mixed prefix convention. Used for fail-fast validation
+        (e.g. interactive startup) without touching the database.
+        """
+        discover_migrations(self.config.directory)
+
     def _confirm(self, prompt):
         """Ask a yes/no question. Only called in interactive mode."""
         try:
@@ -1132,12 +1256,22 @@ class Runner:
         target = state.resolve_target(self.config.target)
         pending = state.pending(self.config.target)
 
-        _print(f"Database: {COLOR.database(self.config.database)}")
-        _print("Current:  {}".format(
-            COLOR.version(current) if current else "(none)"))
-        _print(f"Target:   {COLOR.version(target)}")
-        _print("Latest:   {}".format(
-            COLOR.version(latest) if latest else "(none)"))
+        # Right-align the labels so their colons line up (Database is the
+        # widest). Each version value is bold in its own color so the three
+        # are easy to tell apart: current yellow, target light blue, latest
+        # green. "(none)" is left plain.
+        width = len("Database")
+
+        def row(label, value):
+            _print(f"{label.rjust(width)}: {value}")
+
+        def colored(value, colorer):
+            return colorer(value) if value else "(none)"
+
+        row("Database", COLOR.database(self.config.database))
+        row("Current", colored(current, COLOR.current_version))
+        row("Target", colored(target, COLOR.target_version))
+        row("Latest", colored(latest, COLOR.latest_version))
         _print()
 
         if blocking is not None:
@@ -1179,7 +1313,7 @@ class Runner:
                 r.script_name,
                 r.status,
                 r.execution_start,
-                r.execution_time if r.execution_time else "-",
+                r.execution_duration if r.execution_duration else "-",
             )
             for r in records
         ]
@@ -1187,7 +1321,7 @@ class Runner:
         # Column widths size to the data, but SCRIPT is capped so a very long
         # filename cannot break the layout; it is truncated with an ellipsis
         # to fit the terminal width.
-        headers = ("ID", "VERSION", "SCRIPT", "STATUS", "EXECUTION START", "TIME")
+        headers = ("ID", "VERSION", "SCRIPT", "STATUS", "EXECUTION START", "DURATION")
         w_id = max(len(headers[0]), *(len(r[0]) for r in rows))
         w_ver = max(len(headers[1]), *(len(r[1]) for r in rows))
         w_status = max(len(headers[3]), *(len(r[3]) for r in rows))
@@ -1195,8 +1329,10 @@ class Runner:
         w_time = max(len(headers[5]), *(len(r[5]) for r in rows))
         w_script_data = max(len(headers[2]), *(len(r[2]) for r in rows))
 
-        # Space the fixed columns consume, plus 5 single-space gaps.
-        fixed = w_id + w_ver + w_status + w_start + w_time + 5
+        # Columns are separated by a two-space gap for readability.
+        gap = "  "
+        # Space the fixed columns consume, plus 5 two-space gaps.
+        fixed = w_id + w_ver + w_status + w_start + w_time + 5 * len(gap)
         try:
             term_width = shutil.get_terminal_size((100, 24)).columns
         except OSError:
@@ -1212,7 +1348,14 @@ class Runner:
                 return text[:width]
             return text[: width - 3] + "..."  # ASCII ellipsis, locale-safe
 
-        header = f"{headers[0].ljust(w_id)} {headers[1].ljust(w_ver)} {headers[2].ljust(w_script)} {headers[3].ljust(w_status)} {headers[4].ljust(w_start)} {headers[5]}"
+        header = gap.join((
+            headers[0].ljust(w_id),
+            headers[1].ljust(w_ver),
+            headers[2].ljust(w_script),
+            headers[3].ljust(w_status),
+            headers[4].ljust(w_start),
+            headers[5].ljust(w_time),
+        ))
         _print(COLOR.heading(header))
         for rid, ver, script, status, start, tm in rows:
             # Pad each cell to its column width BEFORE coloring, so the ANSI
@@ -1220,7 +1363,14 @@ class Runner:
             ver_cell = COLOR.version(ver.ljust(w_ver))
             script_cell = COLOR.script(fit(script, w_script).ljust(w_script))
             status_cell = COLOR.status(status, status.ljust(w_status))
-            _print(f"{rid.ljust(w_id)} {ver_cell} {script_cell} {status_cell} {start.ljust(w_start)} {tm}")
+            _print(gap.join((
+                rid.ljust(w_id),
+                ver_cell,
+                script_cell,
+                status_cell,
+                start.ljust(w_start),
+                tm.ljust(w_time),
+            )))
         return 0
 
     # -- run -----------------------------------------------------------------
@@ -1250,24 +1400,25 @@ class Runner:
             state = self._load_state()
 
         pending = state.pending(self.config.target)
-        target = state.resolve_target(self.config.target)
 
         if not pending:
-            current = state.current_version()
-            _print("Current: {}".format(
-                COLOR.version(current) if current else "(none)"))
-            _print(f"Target:  {COLOR.version(target)}")
-            _print()
-            _print("No pending migrations.")
-            return 0
+            # Nothing to do: show the full status (Database/Current/Target/
+            # Latest + "No pending migrations.") rather than a partial summary,
+            # so the output matches `status` exactly.
+            return self.status()
 
         for migration in pending:
             if not self._execute_one(migration, retry=False):
                 return 1
 
         _print()
-        _print(COLOR.success("Migration complete."))
-        _print(f"Current version: {COLOR.version(pending[-1].version)}")
+        _print(COLOR.success_bold("Migration complete."))
+        _print()
+        # The label is bold; the version uses the same bold yellow as Current
+        # in `status`.
+        _print("{} {}".format(
+            COLOR.heading("Current version:"),
+            COLOR.current_version(pending[-1].version)))
         return 0
 
     def _handle_blocking(self, blocking, state):
@@ -1313,14 +1464,15 @@ class Runner:
             self.metadata.insert_in_progress(
                 str(migration.version), migration.filename)
 
-        # In verbose mode, make each script's output a clearly delimited block
-        # with a bold-white header, so successive scripts are easy to tell apart.
+        # The "Executing:" header is always bold white and identical whether
+        # run interactively or not. Verbose mode is the ONLY difference: it
+        # adds a rule delimiter and prints the captured client output as a
+        # clearly delimited block, so successive scripts are easy to tell
+        # apart.
+        _print()
+        _print(COLOR.heading_white(f"Executing: {migration.filename}"))
         if self.config.verbose:
-            _print()
-            _print(COLOR.heading_white(f"Executing: {migration.filename}"))
             _print(COLOR.rule())
-        else:
-            _print(f"Executing: {migration.filename}")
 
         result = self.client.run_migration(sql_text)
 
@@ -1364,7 +1516,7 @@ def _read_migration_sql(path):
 # ---------------------------------------------------------------------------
 
 HELP_TEXT = """\
-mysqlmig - simple MySQL schema migration executor
+mysqlmig - Simple MySQL schema migration executor
 
 Usage:
   mysqlmig [COMMAND] [OPTIONS]
@@ -1375,9 +1527,12 @@ Commands:
   history                    Show migration history
   run                        Execute pending migrations
 
-Run options:
-  -t, --to VERSION|latest    Target version (default: latest)
+Status/run options:
+  -t, --to VERSION|latest    Target version (default: latest).
+                             With status, preview the plan up to that
+                             target. With run, execute up to that target.
   -v, --verbose              Show full mysql client output
+                             (run or interactive mode)
 
 Global options:
   -D, --db DATABASE          Target database
@@ -1386,6 +1541,8 @@ Global options:
   -P, --port PORT            MySQL port
   -u, --user USER            MySQL user
   -L, --login-path NAME      MySQL login path
+  -p, --password[=VALUE]     MySQL password; bare -p prompts (no echo),
+                             --password=VALUE / -pVALUE uses VALUE
       --help                 Show this help
       --version              Show version
       --defaults-file=FILE
@@ -1412,9 +1569,12 @@ def render_help():
     When color is disabled, every wrapper is a no-op, so the text is plain.
     """
     out = []
-    for line in HELP_TEXT.split("\n"):
+    for i, line in enumerate(HELP_TEXT.split("\n")):
         stripped = line.rstrip()
-        if stripped and not line.startswith(" ") and stripped.endswith(":"):
+        if i == 0:
+            # The title line is rendered bold white.
+            out.append(COLOR.heading_white(stripped))
+        elif stripped and not line.startswith(" ") and stripped.endswith(":"):
             out.append(COLOR.heading(stripped))
         elif line.startswith("  "):
             out.append(_colorize_help_line(line))
@@ -1462,35 +1622,74 @@ class InteractiveMenu:
         self._input = input_fn or input
         self._output = output_fn or (lambda msg="": _print(msg))
 
-    def _header(self):
+    def _header(self, user=None):
         self._output(COLOR.heading(
             f"MySQL Migration Tool v{__version__}"))
         self._output()
+        # "Connected to:" is a plain label, not bold.
+        self._output("Connected to:")
         host = self._display_host()
+        # Right-align the labels so their colons line up under the widest
+        # label ("Migrations dir").
+        width = len("Migrations dir")
+
+        def row(label, value):
+            self._output(f"  {label.rjust(width)}: {value}")
+
+        # All values are shown plain (not bold).
         if host:
-            self._output(f"Host:     {host}")
-        self._output(f"Database: {COLOR.database(self.config.database)}")
+            row("Host", host)
+        if user:
+            row("User", user)
+        row("Database", self.config.database)
+        row("Migrations dir", self.config.directory)
 
     def _display_host(self):
         """The configured host for the header (CLI --host, option files, or
         'localhost'). Never the server's @@hostname."""
         return resolve_display_host(self.config.connection)
 
+    def _check_connection(self):
+        """Probe the connection once and return the authenticated user.
+
+        Runs SELECT CURRENT_USER() so that reaching the menu proves the
+        host/user/password and the database are all good. Returns the user
+        string (e.g. 'migrator@localhost'), or raises MysqlmigError if the
+        connection fails.
+        """
+        rows = self.runner.client.query("SELECT CURRENT_USER();")
+        if rows and rows[0] and rows[0][0] not in ("", "NULL"):
+            return rows[0][0]
+        return None
+
     def _menu(self):
         self._output()
         self._output("What would you like to do?")
         self._output()
-        self._output("  1. Initialize database")
-        self._output("  2. Status")
-        self._output("  3. History")
-        self._output("  4. Run migrations")
+        # Each action is colored to match its meaning elsewhere in the tool:
+        # init warning-yellow, status green, history bright blue, run red.
+        self._output(f"  1. {COLOR.warning('Initialize database')}")
+        self._output(f"  2. {COLOR.success('Status')}")
+        self._output(f"  3. {COLOR.script('History')}")
+        self._output(f"  4. {COLOR.failure('Run migrations')}")
         self._output("  5. Help")
         self._output("  6. Exit")
         self._output()
 
     def run(self):
-        """Run the menu loop. Returns an exit code (0)."""
-        self._header()
+        """Run the menu loop. Returns an exit code (0 on normal exit, 1 if the
+        initial connection check fails)."""
+        # Validate the migration directory and the connection before showing
+        # the menu, so a bad --dir or bad host/user/password/database is
+        # reported immediately rather than only when the first action runs.
+        try:
+            self.runner.check_directory()
+            user = self._check_connection()
+        except MysqlmigError as exc:
+            self._output(COLOR.failure(f"ERROR: {exc}"))
+            return 1
+
+        self._header(user=user)
         while True:
             self._menu()
             try:
@@ -1603,16 +1802,24 @@ def _add_global_options(parser):
                         default=argparse.SUPPRESS)
     parser.add_argument("-L", "--login-path", dest="login_path",
                         metavar="NAME", default=argparse.SUPPRESS)
+    # NOTE: -p / --password is NOT handled by argparse. argparse's optional
+    # nargs='?' greedily consumes a following token (so `-p run` would eat the
+    # command), which does not match the mysql client. It is pre-extracted from
+    # argv in main() via _extract_password_arg instead.
     parser.add_argument("--defaults-file", dest="defaults_file",
                         metavar="FILE", default=argparse.SUPPRESS)
     parser.add_argument("--defaults-extra-file", dest="defaults_extra_file",
                         metavar="FILE", default=argparse.SUPPRESS)
 
 
-def _add_run_options(parser):
-    """Add the run-only options to a parser (also SUPPRESS defaults)."""
+def _add_target_option(parser):
+    """Add --to (shared by status and run). SUPPRESS default."""
     parser.add_argument("-t", "--to", dest="to", metavar="VERSION|latest",
                         default=argparse.SUPPRESS)
+
+
+def _add_verbose_option(parser):
+    """Add --verbose (run-only). SUPPRESS default."""
     parser.add_argument("-v", "--verbose", dest="verbose", action="store_true",
                         default=argparse.SUPPRESS)
 
@@ -1627,10 +1834,12 @@ def build_parser():
         add_help=False,
     )
 
-    # Globals + run options are also placed on the subparsers (via a shared
-    # parent) so they may appear either before or after the command.
+    # Globals, plus the command options, are also placed on the top-level
+    # parser so they may appear either before or after the command.
+    # --to applies to status and run; --verbose only to run.
     _add_global_options(parser)
-    _add_run_options(parser)
+    _add_target_option(parser)
+    _add_verbose_option(parser)
 
     global_parent = argparse.ArgumentParser(add_help=False)
     _add_global_options(global_parent)
@@ -1640,27 +1849,37 @@ def build_parser():
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("init", parents=[global_parent], add_help=False,
                    help="Create the database (if needed) and metadata")
-    sub.add_parser("status", parents=[global_parent], add_help=False,
-                   help="Show current migration state")
+    status_parser = sub.add_parser("status", parents=[global_parent],
+                                   add_help=False,
+                                   help="Show current migration state")
+    _add_target_option(status_parser)
     sub.add_parser("history", parents=[global_parent], add_help=False,
                    help="Show migration history")
     run_parser = sub.add_parser("run", parents=[global_parent], add_help=False,
                                 help="Execute pending migrations")
-    _add_run_options(run_parser)
+    _add_target_option(run_parser)
+    _add_verbose_option(run_parser)
 
     return parser
 
 
-def _resolve_config(args, group_reader=None):
+def _resolve_config(args, group_reader=None, prompted_password=None,
+                    password_reader=None):
     """Merge CLI args, [mysqlmig] option-file group, and defaults into Config.
 
     group_reader is an injectable callable(option_file_args)->dict used for the
     [mysqlmig] group; it defaults to the my_print_defaults-based reader. CLI
     values take precedence over the group, which takes precedence over
     built-in defaults.
+
+    prompted_password, when set, is the password entered via -p; it takes
+    precedence over a password configured in [mysqlmig]. Both are relayed to
+    the mysql client through MYSQL_PWD (never the command line).
     """
     if group_reader is None:
         group_reader = _read_mysqlmig_group
+    if password_reader is None:
+        password_reader = _read_mysqlmig_password
 
     # Options use SUPPRESS defaults, so an unspecified option may be absent
     # from the namespace entirely; read everything through getattr.
@@ -1691,16 +1910,36 @@ def _resolve_config(args, group_reader=None):
     explicit_dir = cli_dir or group.get("dir")
     directory = resolve_directory(explicit_dir, database, db_from_cli)
 
+    # Connection settings: CLI > [mysqlmig] > whatever the mysql client
+    # resolves from its own option files ([client], etc.).
     login_path = cli_login_path or group.get("login-path")
+    host = cli_host or group.get("host")
+    port = cli_port or group.get("port")
+    user = cli_user or group.get("user")
+    # Password precedence: an explicitly supplied password (-p / --password,
+    # which may be an EMPTY string if the user pressed Enter at the prompt)
+    # beats a [mysqlmig] password. Use `is not None` rather than truthiness so
+    # that an empty password is honored (matching the mysql client, where a
+    # blank -p prompt means an empty password, NOT a fallback to option files).
+    # The [mysqlmig] password is read directly from the option file because
+    # my_print_defaults masks it.
+    if prompted_password is not None:
+        password = prompted_password
+    else:
+        password = password_reader(
+            defaults_file=cli_defaults_file,
+            defaults_extra_file=cli_defaults_extra_file,
+        )
 
     connection = ConnectionConfig(
         defaults_file=cli_defaults_file,
         defaults_extra_file=cli_defaults_extra_file,
-        host=cli_host,
-        port=cli_port,
-        user=cli_user,
+        host=host,
+        port=port,
+        user=user,
         login_path=login_path,
         database=database,
+        password=password,
     )
 
     return Config(
@@ -1710,6 +1949,37 @@ def _resolve_config(args, group_reader=None):
         target=getattr(args, "to", None),
         verbose=getattr(args, "verbose", False),
     )
+
+
+def _extract_password_arg(argv):
+    """Pull the password option out of argv, mysql-client style.
+
+    Recognizes (and removes from argv) the attached/bare forms, never a
+    space-separated value:
+        -p, --password            -> prompt (_PROMPT_PASSWORD)
+        -pVALUE                    -> VALUE
+        --password=VALUE          -> VALUE
+    `-p VALUE` (with a space) is NOT treated as the password; the VALUE is left
+    in argv for normal parsing (matching the mysql client, where it would be
+    the next argument, not the password).
+
+    Returns (remaining_argv, password), where password is None if the option
+    was not given, the _PROMPT_PASSWORD sentinel for a bare flag, or a string.
+    The last occurrence wins.
+    """
+    remaining = []
+    password = None
+    for token in argv:
+        if token == "-p" or token == "--password":
+            password = _PROMPT_PASSWORD
+        elif token.startswith("--password="):
+            password = token[len("--password="):]
+        elif token.startswith("-p") and len(token) > 2 and not token.startswith("--"):
+            # -pVALUE (attached short form)
+            password = token[2:]
+        else:
+            remaining.append(token)
+    return remaining, password
 
 
 def main(argv=None):
@@ -1731,21 +2001,52 @@ def main(argv=None):
         _print(f"mysqlmig {__version__}")
         return 0
 
+    # Pull the password option out before argparse (see _extract_password_arg).
+    argv, password_arg = _extract_password_arg(argv)
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # Run-only options are meaningless without the `run` command; reject them
-    # instead of silently falling into interactive mode.
-    if args.command is None:
-        for opt_attr, opt_name in (("to", "--to"), ("verbose", "--verbose")):
-            if getattr(args, opt_attr, None) not in (None, False):
-                _eprint(COLOR.failure(
-                    f"ERROR: {opt_name} can only be used with the "
-                    "'run' command."))
-                return 1
+    # Enforce which commands each option is valid with. The top-level parser
+    # accepts --to/--verbose so they may precede the command, so we validate
+    # here rather than relying on argparse alone.
+    #   --to      applies to status and run.
+    #   --verbose applies to run, and to interactive mode (no command) so a
+    #             DBA can enable verbose output for interactive runs.
+    # args.command is None for interactive mode; None is a member of the valid
+    # set where the option is allowed with no command.
+    #   option_attr -> (option_name, label, set of valid commands)
+    _option_commands = {
+        "to": ("--to", "'run' or 'status'", {"status", "run"}),
+        "verbose": ("--verbose", "'run' or interactive mode", {"run", None}),
+    }
+    for opt_attr, (opt_name, label, valid_commands) in _option_commands.items():
+        if getattr(args, opt_attr, None) in (None, False):
+            continue
+        if args.command not in valid_commands:
+            _eprint(COLOR.failure(
+                f"ERROR: {opt_name} can only be used with the {label}."))
+            return 1
+
+    # -p / --password resolution. A bare flag (the _PROMPT_PASSWORD sentinel)
+    # prompts once with no echo; --password=VALUE uses VALUE directly. The
+    # resolved password is passed to the mysql client as --password=VALUE; an
+    # empty value (user pressed Enter at the prompt) means an empty password,
+    # matching the mysql client — it does NOT fall back to option-file creds.
+    cli_password = None
+    if password_arg is _PROMPT_PASSWORD:
+        import getpass
+        try:
+            cli_password = getpass.getpass("MySQL password: ")
+        except (EOFError, KeyboardInterrupt):
+            _eprint("")
+            _eprint(COLOR.failure("ERROR: no password provided."))
+            return 1
+    elif password_arg is not None:
+        cli_password = password_arg
 
     try:
-        config = _resolve_config(args)
+        config = _resolve_config(args, prompted_password=cli_password)
 
         # Interactive mode is selected by the ABSENCE of a command
         # (DESIGN sect 9).
@@ -1753,19 +2054,32 @@ def main(argv=None):
             return InteractiveMenu(config).run()
 
         runner = Runner(config, interactive=False)
-        if args.command == "init":
-            return runner.init()
-        if args.command == "status":
-            return runner.status()
-        if args.command == "history":
-            return runner.history()
-        if args.command == "run":
-            return runner.run()
-        _eprint(f"Unknown command: {args.command}")
-        return 1
+        _command_actions = {
+            "init": runner.init,
+            "status": runner.status,
+            "history": runner.history,
+            "run": runner.run,
+        }
+        action = _command_actions.get(args.command)
+        if action is None:
+            _eprint(f"Unknown command: {args.command}")
+            return 1
+        rc = action()
+        # One trailing blank line after a command's output, so the shell prompt
+        # does not butt up against the last line.
+        _print()
+        return rc
     except MysqlmigError as exc:
         _eprint(COLOR.failure(f"ERROR: {exc}"))
         return 1
+    except KeyboardInterrupt:
+        # Ctrl-C (e.g. during a long migration). Report it cleanly instead of
+        # dumping a traceback. If a migration was mid-flight, its record is
+        # left IN_PROGRESS; `status` will show it and an interactive run can
+        # retry it.
+        _eprint("")
+        _eprint(COLOR.warning("Interrupted. Exiting."))
+        return 130
 
 
 if __name__ == "__main__":

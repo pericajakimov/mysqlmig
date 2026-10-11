@@ -83,6 +83,10 @@ def test_view_excludes_execution_log(mysql_db):
     names = {c[0].lower() for c in cols}
     assert "execution_log" not in names
     assert "execution_start" in names
+    # The duration column is named execution_duration (renamed from
+    # execution_time) in both the table and the view.
+    assert "execution_duration" in names
+    assert "execution_time" not in names
 
 
 # --- lifecycle --------------------------------------------------------------
@@ -96,16 +100,16 @@ def test_insert_then_finalize_sets_time(mysql_db):
     recs = meta.load_records()
     assert len(recs) == 1
     assert recs[0].status == STATUS_IN_PROGRESS
-    assert recs[0].execution_time is None
+    assert recs[0].execution_duration is None
 
     time.sleep(1.1)
     meta.finalize("v1.0", STATUS_SUCCESS, "ok\n")
     recs = meta.load_records()
     assert recs[0].status == STATUS_SUCCESS
     # Duration format HH:MM:SS.mmm (3 decimals), and at least ~1 second elapsed.
-    assert recs[0].execution_time is not None
-    assert re.match(r"^\d{2}:\d{2}:\d{2}\.\d{3}$", recs[0].execution_time)
-    assert recs[0].execution_time.startswith("00:00:01.")
+    assert recs[0].execution_duration is not None
+    assert re.match(r"^\d{2}:\d{2}:\d{2}\.\d{3}$", recs[0].execution_duration)
+    assert recs[0].execution_duration.startswith("00:00:01.")
 
 
 def test_retry_updates_in_place_and_appends_log(mysql_db):
@@ -255,3 +259,38 @@ def test_success_record_missing_from_repo_errors(mysql_db, tmp_path):
     (tmp_path / "v1.1_b.sql").unlink()
     with pytest.raises(MigrationStateError):
         _runner(mysql_db, tmp_path).status()
+
+
+def test_status_with_target_limits_plan(mysql_db, tmp_path, capsys):
+    # Repo v1.0..v1.3, apply only v1.0, then preview `status --to v1.2`.
+    for v in ("v1.0", "v1.1", "v1.2", "v1.3"):
+        _write(tmp_path, f"{v}_t.sql",
+               f"CREATE TABLE t_{v.replace('.', '_')} (id INT PRIMARY KEY);")
+    assert _runner(mysql_db, tmp_path, target="v1.0").run() == 0
+    capsys.readouterr()  # clear run output
+
+    assert _runner(mysql_db, tmp_path, target="v1.2").status() == 0
+    out = capsys.readouterr().out
+    # Target reflects the requested version, not latest (v1.3). Labels are
+    # right-aligned to the width of "Database".
+    assert "Target: v1.2" in out
+    assert "Latest: v1.3" in out
+    # Pending is bounded by the target: v1.1 and v1.2 only, never v1.3.
+    assert "v1.1_t.sql" in out
+    assert "v1.2_t.sql" in out
+    assert "v1.3_t.sql" not in out
+
+
+def test_status_default_target_is_latest(mysql_db, tmp_path, capsys):
+    # With no target, status previews up to the latest available version.
+    for v in ("v1.0", "v1.1", "v1.2"):
+        _write(tmp_path, f"{v}_t.sql",
+               f"CREATE TABLE t_{v.replace('.', '_')} (id INT PRIMARY KEY);")
+    assert _runner(mysql_db, tmp_path, target="v1.0").run() == 0
+    capsys.readouterr()
+
+    assert _runner(mysql_db, tmp_path).status() == 0
+    out = capsys.readouterr().out
+    assert "Target: v1.2" in out
+    assert "v1.1_t.sql" in out
+    assert "v1.2_t.sql" in out

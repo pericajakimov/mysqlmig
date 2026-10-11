@@ -174,10 +174,10 @@ CREATE TABLE IF NOT EXISTS schema_version (
     id              INT UNSIGNED   NOT NULL AUTO_INCREMENT,
     version         VARCHAR(32)    NOT NULL,
     script_name     VARCHAR(255)   NOT NULL,
-    status          ENUM('IN_PROGRESS', 'SUCCESS', 'FAILED') NOT NULL,
-    execution_start TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    execution_time  VARCHAR(16)    NULL,
-    execution_log   LONGTEXT       NULL,
+    status             ENUM('IN_PROGRESS', 'SUCCESS', 'FAILED') NOT NULL,
+    execution_start    TIMESTAMP(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    execution_duration VARCHAR(16)    NULL,
+    execution_log      LONGTEXT       NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_schema_version_version (version)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -190,7 +190,7 @@ Column semantics:
 * `script_name` — migration filename, for example `v1.2_add_indexes.sql`.
 * `status` — `IN_PROGRESS`, `SUCCESS`, or `FAILED`.
 * `execution_start` — millisecond-precision time the latest execution attempt started. It is populated by the database default (`CURRENT_TIMESTAMP(3)`) when the initial record is inserted; `mysqlmig` does not supply a value. On retry, it is reset to the start of the new attempt.
-* `execution_time` — human-readable `HH:MM:SS.mmm` duration of the latest completed execution attempt (millisecond precision, matching the `TIMESTAMP(3)` columns), for example `00:00:12.345`. It is computed by the database on completion from the difference between `execution_start` and `NOW(3)` using native time functions (`SEC_TO_TIME` / `TIME_FORMAT`), and is `NULL` while a migration is `IN_PROGRESS`.
+* `execution_duration` — human-readable `HH:MM:SS.mmm` duration of the latest completed execution attempt (millisecond precision, matching the `TIMESTAMP(3)` columns), for example `00:00:12.345`. It is computed by the database on completion from the difference between `execution_start` and `NOW(3)` using native time functions (`SEC_TO_TIME` / `TIME_FORMAT`), and is `NULL` while a migration is `IN_PROGRESS`.
 * `execution_log` — complete captured output from the MySQL client. It is `NULL` while a migration is `IN_PROGRESS`.
 
 The table is created as `utf8mb4` so that captured MySQL client output stored in `execution_log` round-trips correctly.
@@ -199,8 +199,8 @@ The table is created as `utf8mb4` so that captured MySQL client output stored in
 
 Each migration record is written in two steps, each performed through its own short-lived `mysql` client connection to the target database:
 
-1. **On start** — `mysqlmig` inserts the record with `status = IN_PROGRESS`. `execution_start` is set by the database default, and `execution_time` and `execution_log` are left `NULL`.
-2. **On completion** — once the migration finishes, `mysqlmig` updates the same record to `status = SUCCESS` or `status = FAILED`, sets `execution_log`, and sets `execution_time` from the server-side difference between `execution_start` and `NOW(3)`, formatted as a human-readable duration.
+1. **On start** — `mysqlmig` inserts the record with `status = IN_PROGRESS`. `execution_start` is set by the database default, and `execution_duration` and `execution_log` are left `NULL`.
+2. **On completion** — once the migration finishes, `mysqlmig` updates the same record to `status = SUCCESS` or `status = FAILED`, sets `execution_log`, and sets `execution_duration` from the server-side difference between `execution_start` and `NOW(3)`, formatted as a human-readable duration.
 
 Computing the duration in the database keeps a single clock source (the MySQL server) for both the start time and the elapsed time, avoiding any mix of client and server clocks.
 
@@ -285,7 +285,7 @@ IN_PROGRESS → SUCCESS
 
 The existing `id` is preserved because it represents the migration's position in execution history. A new row is not inserted; the unique `version` constraint guarantees there cannot be two records for the same migration.
 
-On retry start, the existing row is reset to `IN_PROGRESS`, `execution_start` is updated to the new attempt, and `execution_time` is cleared. On completion, the row is updated with the final status and `execution_time`. The new output is appended to `execution_log` rather than replacing the previous attempt:
+On retry start, the existing row is reset to `IN_PROGRESS`, `execution_start` is updated to the new attempt, and `execution_duration` is cleared. On completion, the row is updated with the final status and `execution_duration`. The new output is appended to `execution_log` rather than replacing the previous attempt:
 
 ```text
 --- FAILED ATTEMPT ---
@@ -376,14 +376,14 @@ If a migration partially modifies the database and then fails, `mysqlmig` does n
 
 Each migration is recorded in two steps:
 
-1. **Before execution** — insert an `IN_PROGRESS` record for the migration. `execution_start` is set by the database default; `execution_time` and `execution_log` are left `NULL`.
-2. **After execution** — capture the complete output and update the record to its final status. The database computes `execution_time` during the update as the difference between `execution_start` and `NOW(3)`.
+1. **Before execution** — insert an `IN_PROGRESS` record for the migration. `execution_start` is set by the database default; `execution_duration` and `execution_log` are left `NULL`.
+2. **After execution** — capture the complete output and update the record to its final status. The database computes `execution_duration` during the update as the difference between `execution_start` and `NOW(3)`.
 
-On success, the record is updated to `SUCCESS` with the computed `execution_time` and captured `execution_log`.
+On success, the record is updated to `SUCCESS` with the computed `execution_duration` and captured `execution_log`.
 
 On failure:
 
-1. the record is updated to `FAILED` with `execution_time` and `execution_log`
+1. the record is updated to `FAILED` with `execution_duration` and `execution_log`
 2. execution stops
 3. later migrations are not executed
 
@@ -428,11 +428,13 @@ SELECT
     script_name,
     status,
     execution_start,
-    execution_time
+    execution_duration
 FROM schema_version;
 ```
 
-The view intentionally excludes `execution_log`.
+The view intentionally excludes `execution_log`. The duration column is named
+`execution_duration` in both the table and the view; the `history` command's
+`DURATION` column reflects the same value.
 
 The normal history query is therefore:
 
@@ -450,7 +452,7 @@ SELECT
     script_name,
     status,
     execution_start,
-    execution_time,
+    execution_duration,
     execution_log
 FROM schema_version
 WHERE version = 'v1.7';
@@ -465,8 +467,16 @@ Keeping the log in `schema_version` avoids introducing a separate log table.
 The command structure is:
 
 ```text
-mysqlmig [GLOBAL OPTIONS] COMMAND [COMMAND OPTIONS]
+mysqlmig [OPTIONS] [COMMAND] [OPTIONS]
 ```
+
+Options may appear before or after the command, in any order — for example
+`mysqlmig -D app run` and `mysqlmig run -D app` are equivalent. The
+restriction is that `--to` is valid only with `status` and `run`, and
+`--verbose` is valid only with `run` or with interactive mode (no command, so
+a DBA can enable verbose output for interactive runs). Using `--to` with
+another command or with no command, or `--verbose` with `init`/`status`/
+`history`, is an error.
 
 Commands:
 
@@ -523,6 +533,16 @@ Displays the current migration state, including:
 mysqlmig status
 ```
 
+The target defaults to `latest`. A specific target can be supplied with `--to`
+to preview the plan up to that version without executing anything:
+
+```bash
+mysqlmig status --to v1.7
+```
+
+With a specific target, the pending list is limited to the migrations that
+would run to reach that target, and the reported target version reflects it.
+
 This is a read-only operation.
 
 ### run
@@ -548,7 +568,8 @@ mysqlmig run --verbose
 ```
 
 To preview what a run would do without executing anything, use `status`, which
-reports the current version, target, and the pending migrations.
+reports the current version, target, and the pending migrations. Passing the
+same `--to VERSION` to `status` previews the plan for that specific target.
 
 ### Pending Migrations
 
@@ -568,11 +589,15 @@ If a blocking migration exists (`FAILED` or `IN_PROGRESS`), it must be resolved 
 
 ### No Pending Migrations
 
-If the current version already matches the target:
+If the current version already matches the target, `run` prints the full status
+(identical to the `status` command) rather than a partial summary, so the
+output is consistent regardless of which command produced it:
 
 ```text
-Current: v1.7
-Target:  v1.7
+Database: application
+ Current: v1.7
+  Target: v1.7
+  Latest: v1.7
 
 No pending migrations.
 ```
@@ -645,10 +670,13 @@ opens an interactive menu.
 Example:
 
 ```text
-MySQL Migration Tool v1.0.0
+MySQL Migration Tool v0.2.0
 
-Host:     db-prod.example.com
-Database: application
+Connected to:
+            Host: db-prod.example.com
+            User: migrator@%
+        Database: application
+  Migrations dir: migrations/application
 
 What would you like to do?
 
@@ -662,11 +690,33 @@ What would you like to do?
 Select:
 ```
 
-The menu provides access to the same `init`, `status`, `history`, and `run` operations available through explicit commands. The header always shows the tool version, the host, and the database. Choosing Help prints the help text and then redisplays the menu.
+Before the menu is shown, interactive mode validates two things, failing fast
+if either is wrong:
+
+1. the migration directory — `mysqlmig` checks it exists and is well-formed
+   (so a bad `--dir` is reported immediately, not only when the first action
+   runs); and
+2. the connection — a single `SELECT CURRENT_USER()`. If it fails (bad
+   host/user/password, or an inaccessible database), the error is printed and
+   mysqlmig exits with a non-zero status instead of showing a menu, matching
+   the `mysql` client's "connect on launch" behavior.
+
+On success, the header groups the connection details under a plain `Connected
+to:` label, with the labels right-aligned so their colons line up under
+`Migrations dir:` (the widest): the host (the configured value, not the
+server's `@@hostname`), the authenticated user from `CURRENT_USER()`, the
+database, and the migration directory (`Migrations dir`). Seeing these with no
+error confirms the connection is good, the database exists, and the directory
+is valid, so the DBA can proceed.
+
+The menu provides access to the same `init`, `status`, `history`, and `run`
+operations available through explicit commands; the entries are colored to
+match the meaning used elsewhere in the tool. Choosing Help prints the help
+text and then redisplays the menu.
 
 Interactive `run` may ask for confirmation before executing migrations and before retrying a blocking migration (`FAILED` or `IN_PROGRESS`).
 
-Interactive output should use color where useful (current/target/latest version, pending migrations, successful migrations, warnings, errors). Color is a presentation detail only: it is disabled automatically when stdout is not a TTY, independent of execution mode.
+Output uses color where useful. In the status block, each version value is bold in its own color so the three are easy to tell apart: **Current** bold yellow, **Target** bold light blue, **Latest** bold green; the database name is bold white, pending migrations are shown in the script color. On a successful run, `Migration complete.` is bold green and the final `Current version:` value is bold yellow (matching Current). Color is a presentation detail only: it is disabled automatically when stdout is not a TTY, independent of execution mode.
 
 ### Non-Interactive
 
@@ -706,9 +756,9 @@ Example:
 
 ```text
 Database: application
-Current:  v1.4
-Target:   v1.7
-Latest:   v1.7
+ Current: v1.4
+  Target: v1.7
+  Latest: v1.7
 
 Pending migrations:
   v1.5_add_index.sql
@@ -716,8 +766,30 @@ Pending migrations:
   v1.7_cleanup.sql
 ```
 
-Being read-only, `status` executes no migration SQL and creates or modifies no
-history records.
+The labels are right-aligned so their colons line up under `Database:`, and the
+version values are shown in bold.
+
+By default the target is `latest`. To preview a run that stops at a specific
+version, pass the same `--to VERSION` to `status`:
+
+```bash
+mysqlmig status --to v1.6
+```
+
+```text
+Database: application
+ Current: v1.4
+  Target: v1.6
+  Latest: v1.7
+
+Pending migrations:
+  v1.5_add_index.sql
+  v1.6_new_table.sql
+```
+
+The reported `Target` reflects the requested version and the pending list is
+limited to the migrations that would run to reach it. Being read-only,
+`status` executes no migration SQL and creates or modifies no history records.
 
 ---
 
@@ -725,21 +797,26 @@ history records.
 
 The MySQL client always runs with `-vvv`. This is independent of the `mysqlmig` verbosity option, and the full captured output is always stored in `schema_version.execution_log`.
 
-`mysqlmig --verbose` / `-v` controls only what is displayed to the user.
+`mysqlmig --verbose` / `-v` controls only what is displayed to the user. The
+per-migration output is the same whether `run` is invoked non-interactively or
+from the interactive menu, and the bold `Executing: <file>` header is shown in
+both the plain and verbose forms — verbose only adds the separator rule and the
+captured client output.
 
 Without verbose output:
 
 ```text
 Executing: v1.5_add_index.sql
-  SUCCESS (00:00:03.200)
+  SUCCESS
 
 Executing: v1.6_add_column.sql
-  SUCCESS (00:00:01.800)
+  SUCCESS
 ```
 
 With `--verbose`, each migration's captured client output is shown as a clearly
-delimited block: a bold "Executing: <file>" header followed by a separator rule
-before and after the output, so successive scripts are easy to tell apart.
+delimited block: the same bold `Executing: <file>` header, followed by a
+separator rule and then the output, so successive scripts are easy to tell
+apart.
 
 ```text
 Executing: v1.5_add_index.sql
@@ -807,6 +884,9 @@ not change this ordering — it only forwards the flags to the client.
 db=application
 dir=migrations
 login-path=mysqlmig
+host=db-server-01.example.com
+port=3306
+user=migrator
 ```
 
 Supported settings:
@@ -814,6 +894,31 @@ Supported settings:
 * `db` — default target database
 * `dir` — migration directory
 * `login-path` — MySQL login path
+* `host` — MySQL host
+* `port` — MySQL port
+* `user` — MySQL user
+* `password` — MySQL password (last resort; see Password Handling below)
+
+Only these keys are consulted from `[mysqlmig]`. Any other key found in the
+group (for example a `mysql`-client option such as `connect-timeout`) is
+**ignored with a warning on stderr**, naming the unsupported key(s) and the
+supported set. This is deliberate: `[mysqlmig]` carries only mysqlmig's own
+options, while general `mysql` client options belong in `[client]` (which the
+client reads directly). The warning prevents a DBA from silently expecting an
+unsupported setting to take effect. It is a warning, not an error — the command
+still runs.
+
+The connection settings (`host`, `port`, `user`, `login-path`) let a DBA keep
+migration-specific credentials in `[mysqlmig]`, separate from a general-purpose
+`[client]` group. For each of these, the effective value is resolved as:
+
+```text
+command-line option  >  [mysqlmig]  >  the mysql client's own option files
+```
+
+So `[mysqlmig] user=migrator` overrides `[client] user=...`, and a CLI
+`--user` overrides both. `host`/`port`/`user` are passed through to the `mysql`
+client as command-line options; `password` is handled specially (see below).
 
 Migration files live under a top-level `migrations/` folder, with one subfolder per database. The migration directory is resolved as follows:
 
@@ -852,6 +957,62 @@ Server 3 → login-path=mysqlmig + host=db-server-03
 
 The credentials remain managed by MySQL's login-path mechanism.
 
+### Password Handling
+
+The preferred ways to authenticate remain the MySQL client's own mechanisms —
+a login path (`.mylogin.cnf`) or a `[client]`/`[mysqlmig]` option file — because
+they keep the password out of mysqlmig entirely. However, a login path requires
+`mysql_config_editor`, which is not always available (e.g. some Percona builds,
+or air-gapped hosts where installing tools is impractical). For those cases
+mysqlmig supports these additional ways to supply the password, following the
+`mysql` client's own `-p`/`--password` conventions:
+
+* **`-p` / `--password`** (bare, no value) — prompt for the password once,
+  interactively, with no echo. This is the recommended option when a login
+  path is unavailable: nothing is written to disk and nothing is stored.
+* **`--password=VALUE` / `-pVALUE`** (attached value) — use `VALUE` directly.
+  Convenient for scripts and parity with the `mysql` client. A space-separated
+  `-p VALUE` is **not** treated as the password (again matching the client).
+* **`password=` in `[mysqlmig]`** — a plaintext password in the option file.
+  This is a **last resort**; a plaintext password at rest is inherently
+  insecure and should only be used when no better mechanism is available, with
+  the file protected by restrictive permissions (e.g. `chmod 600`).
+
+Password precedence (within mysqlmig):
+
+```text
+-p / --password (prompt or value)  >  [mysqlmig] password
+```
+
+**How the password reaches the client.** When mysqlmig has an explicit password
+(from any of the above), it passes it to the `mysql` client as a
+`--password=VALUE` command-line argument. This is deliberate and matches the
+`mysql` client's own precedence rules:
+
+* A command-line `--password=` **overrides** a password set in an option file
+  (such as `~/.my.cnf [client] password=`). This is the behavior a DBA expects:
+  if you supply a password to mysqlmig, it must take effect.
+* `MYSQL_PWD` (the environment variable) was considered but **rejected**: in the
+  `mysql` client's precedence, an option-file password beats `MYSQL_PWD`, so a
+  password relayed that way would be silently ignored whenever `~/.my.cnf`
+  contains one — giving the wrong result without any error.
+
+The tradeoff is the standard one: a `--password=` argument is visible in the
+process list (`ps`) for the lifetime of each `mysql` child, exactly as
+`mysql --password=...` is. mysqlmig does not try to hide this; a DBA supplying a
+password on the command line is making the same choice as with the `mysql`
+client. To avoid it entirely, use a login path or let the client's own option
+files authenticate — in which case mysqlmig passes **no** password argument at
+all and the client's normal mechanisms apply unchanged.
+
+When no password is supplied to mysqlmig, nothing is appended, so authentication
+is left completely to the `mysql` client (login path, `[client]`/`[mysqlmig]`
+option files, etc.).
+
+Note: `my_print_defaults` masks password values, so mysqlmig reads the
+`[mysqlmig]` `password` directly from the option file (with `configparser`)
+rather than through that tool.
+
 ### Configuration Precedence
 
 ```text
@@ -862,7 +1023,7 @@ Command line
 Built-in defaults
 ```
 
-MySQL connection and authentication behavior remains delegated to the MySQL client wherever possible. `mysqlmig` does not implement its own credential storage or password management.
+MySQL connection and authentication behavior is delegated to the MySQL client wherever possible. mysqlmig does not implement its own credential storage; the only password it ever handles is one supplied via `-p`/`--password` or `[mysqlmig] password`, which it passes to the client as a `--password=` argument as described above.
 
 ---
 
@@ -881,14 +1042,14 @@ These options are interpreted by `mysqlmig` itself and are not passed to `mysql`
 --dir
 ```
 
-The following are `run`-only options, also interpreted by `mysqlmig`:
+The following are command-scoped options, also interpreted by `mysqlmig`:
 
 ```text
---to (-t)
---verbose (-v)
+--to (-t)        valid with status and run
+--verbose (-v)   valid with run, and with interactive mode (no command)
 ```
 
-`--to` and `--verbose` are only valid with the `run` command. Supplying them with another command, or with no command at all, is a command-line usage error (mysqlmig reports it rather than falling into interactive mode).
+`--to` is valid with the `status` and `run` commands. `--verbose` is valid with the `run` command and with interactive mode (no command), so verbose output can be enabled for interactive runs; it is not valid with `init`, `status`, or `history`. Supplying an option with a command it does not apply to, or `--to` with no command, is a command-line usage error (mysqlmig reports it rather than falling into interactive mode).
 
 The `--db` option is interpreted by `mysqlmig` because the database name is part of migration state and is used when determining the default migration directory. It is aligned with the MySQL client's `-D` database option, and `mysqlmig` passes the corresponding database option through to each `mysql` invocation.
 
@@ -914,6 +1075,14 @@ The following MySQL connection options are supported by `mysqlmig` and passed th
 --port PORT (-P)
 --user USER (-u)
 --login-path NAME (-L)
+```
+
+The password is also a connection option. When supplied it is passed to the
+client as `--password=VALUE` (see Password Handling for why, and the `ps`
+tradeoff):
+
+```text
+--password[=VALUE] (-p)   Bare: prompt (no echo). =VALUE / -pVALUE: use VALUE.
 ```
 
 The database is supplied using:
@@ -1008,11 +1177,12 @@ The target database is selected from:
 
 An explicit command-line value takes precedence over the configuration value. The database name is also used as the default migration directory when no `dir` is configured. `--db` / `-D` applies to all commands.
 
-The target migration version is a `run`-only option:
+The target migration version is supplied with `--to`, valid for both `status` and `run`:
 
 ```text
 mysqlmig run --to VERSION
 mysqlmig run -t VERSION
+mysqlmig status --to VERSION
 ```
 
 or:
@@ -1022,9 +1192,9 @@ mysqlmig run --to latest
 mysqlmig run -t latest
 ```
 
-`latest` means the highest available migration version, and is the default when `--to` is omitted. `--to` is only valid with `run`; it has no meaning for `status` or `history`.
+`latest` means the highest available migration version, and is the default when `--to` is omitted. `--to` is valid with `run` (where it bounds execution) and `status` (where it previews the plan up to that target); it has no meaning for `init` or `history`.
 
-The requested target must exist in the migration directory. A target lower than the current successful version is invalid. An invalid or missing target causes `mysqlmig` to fail before executing migrations.
+The requested target must exist in the migration directory. A target lower than the current successful version is invalid. For `run`, an invalid or missing target causes `mysqlmig` to fail before executing migrations; for `status`, the same validation applies before the preview is produced.
 
 ---
 
@@ -1119,20 +1289,25 @@ Success:
 
 ```text
 Executing: v1.5_add_index.sql
-  SUCCESS (00:00:03.200)
+  SUCCESS
 
 Executing: v1.6_add_column.sql
-  SUCCESS (00:00:01.800)
+  SUCCESS
 
 Migration complete.
+
 Current version: v1.6
 ```
+
+`Migration complete.` is bold green; a blank line separates it from the final
+`Current version:` line, whose value is bold yellow (matching Current in
+`status`).
 
 Failure:
 
 ```text
 Executing: v1.7_cleanup.sql
-  FAILED (00:00:02.100)
+  FAILED
 
 Migration failed.
 Current version remains: v1.6
@@ -1176,17 +1351,17 @@ With `--verbose`, the full output captured from each MySQL client process is dis
 `history` displays the concise migration history (the large execution log is not displayed):
 
 ```text
-ID  VERSION  SCRIPT                  STATUS   EXECUTION START       TIME
-1   v1.0     v1.0_initial.sql       SUCCESS  2026-10-07 18:00:01  00:00:02.100
-2   v1.1     v1.1_add_users.sql     SUCCESS  2026-10-07 18:00:04  00:00:01.800
-3   v1.2     v1.2_add_indexes.sql   FAILED   2026-10-07 18:00:08  00:00:03.700
+ID  VERSION  SCRIPT                STATUS   EXECUTION START      DURATION
+1   v1.0     v1.0_initial.sql      SUCCESS  2026-10-07 18:00:01  00:00:02.100
+2   v1.1     v1.1_add_users.sql    SUCCESS  2026-10-07 18:00:04  00:00:01.800
+3   v1.2     v1.2_add_indexes.sql  FAILED   2026-10-07 18:00:08  00:00:03.700
 ```
 
-`execution_start` is shown as the start time. A row that is still `IN_PROGRESS` (for example after an interrupted run) has no `execution_time` yet, which is rendered as a blank or `-`:
+`execution_start` is shown as the start time. A row that is still `IN_PROGRESS` (for example after an interrupted run) has no `execution_duration` yet, which is rendered as a blank or `-`:
 
 ```text
-ID  VERSION  SCRIPT                  STATUS       EXECUTION START       TIME
-3   v1.2     v1.2_add_indexes.sql   IN_PROGRESS  2026-10-07 18:00:08  -
+ID  VERSION  SCRIPT                STATUS       EXECUTION START      DURATION
+3   v1.2     v1.2_add_indexes.sql  IN_PROGRESS  2026-10-07 18:00:08  -
 ```
 
 History column widths are sized to the data and adapt to the terminal width.
@@ -1227,16 +1402,19 @@ The tool should report useful human-readable context without unnecessarily reint
 
 ## 20. Exit Codes
 
-`mysqlmig` uses two exit codes:
+`mysqlmig` uses these exit codes:
 
 ```text
-0  Success
-1  Error
+0    Success
+1    Error
+130  Interrupted (Ctrl-C / SIGINT)
 ```
 
 Exit code `0` is returned for successful read-only commands and successful migration runs, including when there are no pending migrations.
 
 Exit code `1` is returned for any error, including invalid usage, invalid migration state, a failed migration, a blocking migration that cannot be retried non-interactively, and metadata or connection failures. The specific cause is described in a human-readable message on stderr rather than encoded in the exit code.
+
+Exit code `130` is returned when `mysqlmig` is interrupted with Ctrl-C (`SIGINT`), for example during a long-running migration. Rather than dumping a Python traceback, `mysqlmig` catches the interrupt, prints a short `Interrupted. Exiting.` warning on stderr, and exits with `130` (the conventional shell code for SIGINT). If a migration was mid-flight, its `schema_version` record is left `IN_PROGRESS`; `status` will show it as blocking, and an interactive `run` can retry it.
 
 ---
 
@@ -1417,7 +1595,7 @@ mysqlmig run
             ├── insert IN_PROGRESS record (new mysql connection)
             ├── run migration SQL (separate mysql process)
             ├── capture output
-            └── update record to SUCCESS/FAILED, DB computes execution_time
+            └── update record to SUCCESS/FAILED, DB computes execution_duration
                   (new mysql connection; stop on failure)
 ```
 
@@ -1616,7 +1794,7 @@ The implementation is complete when:
 * `v_schema_version` is created automatically.
 * An `IN_PROGRESS` record is inserted before a migration runs, then updated to the final status on completion.
 * `execution_start` is populated by the database default on insert.
-* `execution_time` and `execution_log` are `NULL` while a migration is `IN_PROGRESS`.
+* `execution_duration` and `execution_log` are `NULL` while a migration is `IN_PROGRESS`.
 * Successful migrations are recorded as `SUCCESS`.
 * Failed migrations are recorded as `FAILED`.
 * An interrupted migration is left as `IN_PROGRESS` and is visible in history.
@@ -1692,6 +1870,7 @@ Global:
 --port PORT (-P)
 --user USER (-u)
 --login-path NAME (-L)
+--password[=VALUE] (-p)
 --defaults-file=FILE
 --defaults-extra-file=FILE
 ```

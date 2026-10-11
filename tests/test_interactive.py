@@ -8,10 +8,22 @@ from mysqlmig import HELP_TEXT, Config, ConnectionConfig, InteractiveMenu, Mysql
 
 
 class StubClient:
-    """Stub mysql client: _display_host queries @@hostname; return nothing."""
+    """Stub mysql client.
+
+    By default the connection probe (SELECT CURRENT_USER()) succeeds and
+    returns a user. Set `fail` to raise, simulating a bad connection.
+    """
+
+    def __init__(self, user="migrator@localhost", fail=False):
+        self._user = user
+        self._fail = fail
 
     def query(self, sql):
-        return []
+        from mysqlmig import MysqlmigError
+        if self._fail:
+            raise MysqlmigError(
+                "mysql query failed:\nERROR 1045 (28000): Access denied")
+        return [[self._user]]
 
 
 class StubMetadata:
@@ -41,6 +53,10 @@ class StubRunner:
 
     def _load_state(self):
         return StubState(self._pending)
+
+    def check_directory(self):
+        # Stub: the migration directory is assumed valid in these tests.
+        return None
 
     def init(self):
         self.calls.append("init")
@@ -157,6 +173,31 @@ def test_header_shows_version_and_database():
     joined = "\n".join(output)
     assert "MySQL Migration Tool v" in joined
     assert "Database: app" in joined
+    # The migration directory is shown under the connection details.
+    assert "Migrations dir: app" in joined
+
+
+def test_header_shows_authenticated_user():
+    # The user comes from the startup connection probe (CURRENT_USER()).
+    menu, stub, output = _menu(["6"])
+    menu.runner.client = StubClient(user="migrator@localhost")
+    menu.run()
+    joined = "\n".join(output)
+    # Labels are right-aligned to the width of "Migrations".
+    assert "User: migrator@localhost" in joined
+    assert "Connected to:" in joined
+
+
+def test_connection_failure_exits_before_menu():
+    # A failed startup probe prints the error and returns 1 without a menu.
+    menu, stub, output = _menu(["2", "6"])
+    menu.runner.client = StubClient(fail=True)
+    rc = menu.run()
+    assert rc == 1
+    joined = "\n".join(output)
+    assert "ERROR" in joined
+    assert "What would you like to do?" not in joined  # menu never shown
+    assert stub.calls == []  # no action attempted
 
 
 def test_header_shows_configured_host(monkeypatch):
@@ -166,7 +207,7 @@ def test_header_shows_configured_host(monkeypatch):
     menu, stub, output = _menu(["6"])
     menu.run()
     joined = "\n".join(output)
-    assert "Host:     aurora.example.com" in joined
+    assert "Host: aurora.example.com" in joined
 
 
 def test_header_shows_localhost_when_no_host_configured(monkeypatch):
@@ -176,7 +217,7 @@ def test_header_shows_localhost_when_no_host_configured(monkeypatch):
     menu, stub, output = _menu(["6"])
     menu.run()
     joined = "\n".join(output)
-    assert "Host:     localhost" in joined
+    assert "Host: localhost" in joined
 
 
 def test_command_error_does_not_crash_loop():

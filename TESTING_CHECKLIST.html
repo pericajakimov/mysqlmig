@@ -101,6 +101,7 @@
   <h2>1. Help and version</h2>
   <ul data-section="help">
     <li class="item"><input type="checkbox"><label><code>mysqlmig --help</code> prints colored help (bold headings, green commands, cyan flags, yellow metavars) in a terminal.</label></li>
+    <li class="item"><input type="checkbox"><label>Help title reads <code>mysqlmig - Simple MySQL schema migration executor</code> (capital S) and is bold white in a terminal.</label></li>
     <li class="item"><input type="checkbox"><label><code>mysqlmig --help | cat</code> is plain (no color codes) when piped.</label></li>
     <li class="item"><input type="checkbox"><label><code>NO_COLOR=1 mysqlmig --help</code> is plain even in a terminal.</label></li>
     <li class="item"><input type="checkbox"><label><code>--help</code> shows descriptions for <code>--defaults-file</code> and <code>--defaults-extra-file</code>.</label></li>
@@ -126,21 +127,39 @@
     <li class="item"><input type="checkbox"><label><code>mysqlmig run --to v1.1 -D demo</code> (run option + global after command).</label></li>
     <li class="item"><input type="checkbox"><label><code>mysqlmig -D demo run --to v1.1 --verbose</code> (mixed).</label></li>
     <li class="item"><input type="checkbox"><label><code>-h</code> means host not help: <code>status -D demo -h 127.0.0.1</code> connects / errors, does not print help.</label></li>
+    <li class="item"><input type="checkbox"><label><code>-p</code> works before and after the command: <code>-p run</code> and <code>run -p</code> both prompt.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--to</code> works with <code>status</code> before and after the command: <code>status --to v1.1</code> and <code>--to v1.1 status</code> both accepted.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--to</code> with no command errors: <code>mysqlmig --to v1.0</code> → "can only be used with the 'run' or 'status' command" (exit 1), not interactive mode.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--to</code> rejected for <code>init</code>/<code>history</code>: <code>init --to v1.0</code> and <code>history --to v1.0</code> → "unrecognized arguments" (exit != 0).</label></li>
+    <li class="item"><input type="checkbox"><label><code>--verbose</code> rejected for <code>init</code>/<code>status</code>/<code>history</code> (<code>status --verbose</code> → "unrecognized arguments"), but ALLOWED with <code>run</code> and in interactive mode (<code>mysqlmig --verbose</code> with no command enters the menu, enabling verbose for interactive runs).</label></li>
   </ul>
 
-  <h2>4. The three commands (non-interactive)</h2>
+  <h2>4. The commands (non-interactive)</h2>
+  <h3>init</h3>
+  <ul data-section="initcmd">
+    <li class="item"><input type="checkbox"><label><code>init -D demo</code> on an existing empty db creates <code>schema_version</code> + <code>v_schema_version</code> (exit 0).</label></li>
+    <li class="item"><input type="checkbox"><label>Second <code>init</code> → "Already initialized" warning, exit 0 (idempotent).</label></li>
+    <li class="item"><input type="checkbox"><label><code>init</code> on a NON-existent database → clear error (exit 1); it does NOT create the database.</label></li>
+    <li class="item"><input type="checkbox"><label>Init is also available as menu option 1 in interactive mode.</label></li>
+  </ul>
   <h3>status</h3>
   <ul data-section="status">
     <li class="item"><input type="checkbox"><label>Fresh db: <code>status</code> reports "not initialized", exit 1.</label></li>
     <li class="item"><input type="checkbox"><label>After migrations: shows Database, Current, Target, Latest, Pending.</label></li>
-    <li class="item"><input type="checkbox"><label>Colors: Database bold white, versions cyan, pending scripts bright blue.</label></li>
+    <li class="item"><input type="checkbox"><label>Labels Current/Target/Latest are right-aligned so their colons line up under <code>Database:</code>.</label></li>
+    <li class="item"><input type="checkbox"><label>Version values are bold, each in its own color: Current yellow, Target light blue, Latest green. (<code>(none)</code> is plain.)</label></li>
+    <li class="item"><input type="checkbox"><label><code>status --to v1.1</code> previews the plan for that target: Target shows v1.1 and Pending is limited to migrations up to v1.1 (changes nothing).</label></li>
+    <li class="item"><input type="checkbox"><label><code>status --to v9.9</code> (non-existent) and a target below current are rejected, same as <code>run</code>.</label></li>
+    <li class="item"><input type="checkbox"><label>Colors: Database bold white; Current bold yellow; Target bold light blue; Latest bold green; pending scripts bright blue.</label></li>
   </ul>
   <h3>run</h3>
   <ul data-section="run">
     <li class="item"><input type="checkbox"><label>Fresh db: <code>run -D demo</code> creates metadata, applies all in order, SUCCESS each, "Migration complete".</label></li>
-    <li class="item"><input type="checkbox"><label>Re-run when done: "No pending migrations", exit 0.</label></li>
+    <li class="item"><input type="checkbox"><label>On completion: <code>Migration complete.</code> is bold green, then a blank line, then <code>Current version: vX</code> with the label bold and the version bold yellow (same as Current in status).</label></li>
+    <li class="item"><input type="checkbox"><label>Re-run when done: prints the FULL status (Database/Current/Target/Latest) followed by "No pending migrations", exit 0 — identical to <code>status</code>, not a partial summary.</label></li>
+    <li class="item"><input type="checkbox"><label><code>Executing: &lt;script&gt;</code> header is bold and identical with and without <code>--verbose</code>; <code>--verbose</code> only adds the separator rule + captured client log. Output is the same in interactive and non-interactive runs.</label></li>
     <li class="item"><input type="checkbox"><label><code>run -D demo --to v1.1</code> applies only up to v1.1.</label></li>
-    <li class="item"><input type="checkbox"><label><code>run -D demo --dry-run</code> shows plan, changes nothing (verify <code>history</code> unchanged).</label></li>
+    <li class="item"><input type="checkbox"><label>No dry-run flag by design: <code>status</code> (optionally <code>status --to vX</code>) is the preview; it changes nothing (verify <code>history</code> unchanged).</label></li>
     <li class="item"><input type="checkbox"><label><code>run -D demo --verbose</code> shows full mysql client output.</label></li>
     <li class="item"><input type="checkbox"><label>Target below current rejected (at v1.3, <code>run --to v1.1</code>).</label></li>
     <li class="item"><input type="checkbox"><label>Non-existent target (<code>run --to v9.9</code>) rejected.</label></li>
@@ -148,10 +167,12 @@
   <h3>history</h3>
   <ul data-section="history">
     <li class="item"><input type="checkbox"><label>Fresh db: "not initialized".</label></li>
-    <li class="item"><input type="checkbox"><label>After runs: one row per migration (ID, VERSION, SCRIPT, STATUS, EXECUTION START, TIME).</label></li>
+    <li class="item"><input type="checkbox"><label>After runs: one row per migration (ID, VERSION, SCRIPT, STATUS, EXECUTION START, DURATION — the last column is now DURATION, not TIME).</label></li>
+    <li class="item"><input type="checkbox"><label>Columns are separated by 2 spaces and stay aligned (header + rows), including the DURATION column.</label></li>
     <li class="item"><input type="checkbox"><label>STATUS colored (green/red/yellow).</label></li>
-    <li class="item"><input type="checkbox"><label>EXECUTION START and TIME clearly separated.</label></li>
-    <li class="item"><input type="checkbox"><label>TIME is <code>HH:MM:SS.mmm</code> (3 decimals).</label></li>
+    <li class="item"><input type="checkbox"><label>EXECUTION START and DURATION clearly separated.</label></li>
+    <li class="item"><input type="checkbox"><label>DURATION is <code>HH:MM:SS.mmm</code> (3 decimals).</label></li>
+    <li class="item"><input type="checkbox"><label>The duration column is named <code>execution_duration</code> in BOTH the table and the view: <code>mysql demo -e "SELECT id, execution_duration FROM v_schema_version;"</code> works, and <code>... FROM schema_version;</code> too; <code>execution_time</code> no longer exists.</label></li>
   </ul>
 
   <h2>5. Failure, blocking, and retry (migrations/scenarios/)</h2>
@@ -174,6 +195,7 @@
   <h3>interruption (left IN_PROGRESS)</h3>
   <ul data-section="interrupt">
     <li class="item"><input type="checkbox"><label>Copy <code>scenarios/v1.5_long_sleep.sql</code>, run; while sleeping, interrupt (Ctrl-C, or <code>KILL QUERY &lt;id&gt;</code> via <code>SHOW PROCESSLIST</code>).</label></li>
+    <li class="item"><input type="checkbox"><label>Ctrl-C during the long migration exits cleanly: a short "Interrupted. Exiting." warning (NO Python traceback), exit code 130 (<code>echo $?</code>).</label></li>
     <li class="item"><input type="checkbox"><label><code>status</code> shows v1.5 blocking (IN_PROGRESS).</label></li>
     <li class="item"><input type="checkbox"><label><code>history</code> shows IN_PROGRESS row with blank/<code>-</code> TIME.</label></li>
     <li class="item"><input type="checkbox"><label>Non-interactive run stops; interactive run offers retry.</label></li>
@@ -184,17 +206,21 @@
   <pre><code>[mysqlmig]
 db=demo
 dir=migrations/demo
-
-[client]
-host=127.0.0.1</code></pre>
+host=127.0.0.1
+user=migrator
+# password=... (optional; see section 7)</code></pre>
   <ul data-section="config">
     <li class="item"><input type="checkbox"><label><code>mysqlmig --defaults-file=/tmp/mysqlmig-test.cnf status</code> uses db+dir from the file (no <code>-D</code>/<code>--dir</code>).</label></li>
     <li class="item"><input type="checkbox"><label>CLI <code>-D other</code> overrides <code>[mysqlmig] db</code>.</label></li>
     <li class="item"><input type="checkbox"><label>CLI <code>--dir X</code> overrides <code>[mysqlmig] dir</code>.</label></li>
+    <li class="item"><input type="checkbox"><label><code>host</code>/<code>user</code> read from <code>[mysqlmig]</code> are used to connect.</label></li>
+    <li class="item"><input type="checkbox"><label>A different <code>user</code> in <code>[mysqlmig]</code> vs <code>[client]</code> → the <code>[mysqlmig]</code> one is used.</label></li>
+    <li class="item"><input type="checkbox"><label>CLI <code>-h</code>/<code>-u</code> override the <code>[mysqlmig]</code> host/user.</label></li>
     <li class="item"><input type="checkbox"><label><code>--defaults-file</code> means ONLY that file is read (host in it used; remove → fallback).</label></li>
-    <li class="item"><input type="checkbox"><label><code>--defaults-extra-file</code> adds on top of <code>~/.my.cnf</code> (both consulted).</label></li>
-    <li class="item"><input type="checkbox"><label>Precedence: CLI &gt; <code>[mysqlmig]</code> &gt; defaults.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--defaults-extra-file</code> adds to the normal set — but note <code>~/.my.cnf</code> wins on conflicting keys (standard MySQL precedence).</label></li>
+    <li class="item"><input type="checkbox"><label>Precedence: CLI &gt; <code>[mysqlmig]</code> &gt; client option files.</label></li>
     <li class="item"><input type="checkbox"><label>Same <code>--defaults-file</code> controls BOTH <code>[mysqlmig]</code> and the mysql client connection.</label></li>
+    <li class="item"><input type="checkbox"><label>An UNSUPPORTED key in <code>[mysqlmig]</code> (e.g. add <code>connect-timeout=5</code>) prints a WARNING on stderr naming the key + the supported set, and the command still runs (not an error). Supported mysql client options belong in <code>[client]</code>.</label></li>
   </ul>
 
   <h2>7. Connection options and host display</h2>
@@ -206,22 +232,50 @@ host=127.0.0.1</code></pre>
     <li class="item"><input type="checkbox"><label>Host display is NEVER the server's <code>@@hostname</code>.</label></li>
   </ul>
 
+  <h3>password</h3>
+  <p class="note">Use a password-protected user. Tip: avoid collisions with your personal
+  <code>~/.my.cnf</code> — test against a dedicated user, or isolate with
+  <code>--defaults-file</code>. e.g.
+  <code>CREATE USER 'migrator'@'localhost' IDENTIFIED BY 'secret'; GRANT ALL ON demo.* TO 'migrator'@'localhost';</code></p>
+  <ul data-section="password">
+    <li class="item"><input type="checkbox"><label><code>-p</code> prompts once (no echo) and then connects; one prompt serves the whole command (not per migration).</label></li>
+    <li class="item"><input type="checkbox"><label><code>-p</code> works both before and after the command (<code>-p run</code> / <code>run -p</code>), and <code>-p run</code> does NOT treat <code>run</code> as the password.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--password=VALUE</code> connects using VALUE (e.g. <code>status --password=secret</code>).</label></li>
+    <li class="item"><input type="checkbox"><label><code>-pVALUE</code> (attached, no space) connects using VALUE.</label></li>
+    <li class="item"><input type="checkbox"><label><code>-p VALUE</code> (with a space) does NOT use VALUE as the password (matches the mysql client).</label></li>
+    <li class="item"><input type="checkbox"><label>CLI value overrides a <code>[mysqlmig] password</code> (CLI wins).</label></li>
+    <li class="item"><input type="checkbox"><label><code>password=secret</code> in <code>[mysqlmig]</code> connects without <code>-p</code>.</label></li>
+    <li class="item"><input type="checkbox"><label>Special characters in the password (e.g. <code>p@ss w0rd!</code>) work from both <code>-p</code> and config.</label></li>
+    <li class="item"><input type="checkbox"><label><code>-p</code> overrides a <code>[mysqlmig] password</code> (prompt wins).</label></li>
+    <li class="item"><input type="checkbox"><label>Supplied password OVERRIDES <code>~/.my.cnf</code>: with a <code>password</code> in your <code>~/.my.cnf</code>, <code>-p</code> (or <code>--password=</code>) with a WRONG password still fails with "Access denied" (exit 1). [This is the key fix — it must not silently use the my.cnf password.]</label></li>
+    <li class="item"><input type="checkbox"><label>Password IS on the mysql command line (expected, matches the mysql client): while a long migration runs (sleep scenario) with a supplied password, <code>ps aux | grep mysql</code> shows <code>--password=</code>. (Use a login path to avoid this.)</label></li>
+    <li class="item"><input type="checkbox"><label>No password supplied → mysqlmig passes none; <code>~/.my.cnf</code>/login-path auth works as normal.</label></li>
+    <li class="item"><input type="checkbox"><label>Wrong password → clear "Access denied" error (exit 1), no traceback.</label></li>
+  </ul>
+
   <h2>8. Interactive mode</h2>
   <p class="note">Run with no command: <code>mysqlmig -D demo</code></p>
   <ul data-section="interactive">
-    <li class="item"><input type="checkbox"><label>Header: version (bold), Host, Database (bold white).</label></li>
-    <li class="item"><input type="checkbox"><label>Menu: 1 Status, 2 History, 3 Run, 4 Help, 5 Exit.</label></li>
+    <li class="item"><input type="checkbox"><label>Header: version (bold), then a plain (not bold) <code>Connected to:</code> label, then right-aligned <code>Host</code>, <code>User</code> (authenticated), <code>Database</code>, and <code>Migrations dir</code> (the migration directory) — labels' colons line up under <code>Migrations dir:</code>. All VALUES are plain (not bold); only the title line is bold.</label></li>
+    <li class="item"><input type="checkbox"><label>Menu items are colored: Initialize yellow, Status green, History bright blue, Run red.</label></li>
+    <li class="item"><input type="checkbox"><label>Connection is validated on entry: with GOOD creds the header + menu appear.</label></li>
+    <li class="item"><input type="checkbox"><label>Bad <code>--dir</code> is validated on entry: <code>mysqlmig -D demo --dir does-not-exist</code> reports the directory error and exits WITHOUT showing the menu (like the connection check).</label></li>
+    <li class="item"><input type="checkbox"><label>With BAD creds (e.g. <code>-u a -pb</code>): fails fast with "Access denied" error, exit 1, NO menu shown.</label></li>
+    <li class="item"><input type="checkbox"><label>User shown is the authenticated <code>CURRENT_USER()</code> (e.g. <code>migrator@localhost</code>), confirming who you are connected as.</label></li>
+    <li class="item"><input type="checkbox"><label>Menu: 1 Initialize database, 2 Status, 3 History, 4 Run migrations, 5 Help, 6 Exit.</label></li>
     <li class="item"><input type="checkbox"><label>Visual separator between output and next menu.</label></li>
-    <li class="item"><input type="checkbox"><label>1 Status shows state; 2 History shows table.</label></li>
-    <li class="item"><input type="checkbox"><label>4 Help prints colored help, menu reappears.</label></li>
-    <li class="item"><input type="checkbox"><label>5 / <code>exit</code> / <code>quit</code> / <code>q</code> / Ctrl-D all exit cleanly.</label></li>
+    <li class="item"><input type="checkbox"><label>1 Initialize creates the metadata (table + view) in the database.</label></li>
+    <li class="item"><input type="checkbox"><label>2 Status shows state; 3 History shows table.</label></li>
+    <li class="item"><input type="checkbox"><label>5 Help prints colored help, menu reappears.</label></li>
+    <li class="item"><input type="checkbox"><label>6 / <code>exit</code> / <code>quit</code> / <code>q</code> / Ctrl-D all exit cleanly.</label></li>
     <li class="item"><input type="checkbox"><label>Invalid choice reprompts without crashing.</label></li>
-    <li class="item"><input type="checkbox"><label>Fresh db Run: shows "not initialized" note AND lists all pending, then prompts; confirm create applies.</label></li>
+    <li class="item"><input type="checkbox"><label>Fresh db Run (4): shows "not initialized" note AND lists all pending, then prompts; confirm create applies.</label></li>
     <li class="item"><input type="checkbox"><label>Initialized + pending Run: shows status + pending, then prompts "Target version [latest]:".</label></li>
     <li class="item"><input type="checkbox"><label>Specific version migrates only up to it.</label></li>
     <li class="item"><input type="checkbox"><label>Blank (Enter) migrates to latest.</label></li>
     <li class="item"><input type="checkbox"><label>Already at latest: Run shows "No pending migrations", NO target prompt.</label></li>
     <li class="item"><input type="checkbox"><label>Command error inside menu is shown but does not exit the menu.</label></li>
+    <li class="item"><input type="checkbox"><label><code>mysqlmig -D demo --verbose</code> enters interactive mode and a Run from the menu shows full (verbose) mysql output.</label></li>
   </ul>
 
   <h2>9. Multiple databases / directories</h2>
@@ -245,6 +299,7 @@ host=127.0.0.1</code></pre>
   <ul data-section="exit">
     <li class="item"><input type="checkbox"><label>Success (incl. "no pending") returns 0: <code>echo $?</code>.</label></li>
     <li class="item"><input type="checkbox"><label>Any error returns 1 (bad usage, bad target, failed migration, blocked retry, connection failure, uninitialized status/history).</label></li>
+    <li class="item"><input type="checkbox"><label>Ctrl-C (SIGINT) during execution returns 130.</label></li>
   </ul>
 
   <h2>12. Color / output sanity</h2>
@@ -252,6 +307,7 @@ host=127.0.0.1</code></pre>
     <li class="item"><input type="checkbox"><label>Piped output (<code>| cat</code>) has no stray escape codes.</label></li>
     <li class="item"><input type="checkbox"><label><code>history</code> columns stay aligned with color on or off.</label></li>
     <li class="item"><input type="checkbox"><label><code>NO_COLOR=1</code> disables color everywhere.</label></li>
+    <li class="item"><input type="checkbox"><label>Each command's output ends with exactly one trailing blank line (status/history/run/init) so the shell prompt doesn't butt up against the last line.</label></li>
   </ul>
 
   <h2>Notes / issues found</h2>
@@ -260,6 +316,8 @@ host=127.0.0.1</code></pre>
   <h2>Cleanup</h2>
   <pre><code>mysql -e "DROP DATABASE IF EXISTS demo;"
 mysql -e "DROP DATABASE IF EXISTS reporting;"   # if created
+mysql -e "DROP USER IF EXISTS 'migrator'@'localhost';"    # if created for password tests
+mysql -e "DROP USER IF EXISTS 'migrator'@'127.0.0.1';"    # if created via host=127.0.0.1
 rm -f migrations/demo/v1.4_will_fail.sql migrations/demo/v1.5_long_sleep.sql
 rm -f /tmp/mysqlmig-test.cnf</code></pre>
 

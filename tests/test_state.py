@@ -29,7 +29,7 @@ def rec(id, version_raw, status):
         script_name=f"{version_raw}_desc.sql",
         status=status,
         execution_start="2026-10-08 10:00:00.000",
-        execution_time=None if status == STATUS_IN_PROGRESS else "00:00:01.0",
+        execution_duration=None if status == STATUS_IN_PROGRESS else "00:00:01.0",
     )
 
 

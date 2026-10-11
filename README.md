@@ -91,6 +91,7 @@ mysqlmig
 ```bash
 mysqlmig init                        # create the metadata in an existing db (idempotent)
 mysqlmig status                      # current migration state (also previews pending)
+mysqlmig status --to v1.7            # preview the plan up to and including v1.7
 mysqlmig history                     # applied-migration history
 mysqlmig run                         # migrate to the latest version
 mysqlmig run --to v1.7               # migrate up to and including v1.7
@@ -98,12 +99,19 @@ mysqlmig run --verbose               # show full mysql client output
 ```
 
 To preview what a `run` would do without changing anything, use `status` — it
-lists the pending migrations. (There is no separate dry-run flag.)
+lists the pending migrations. Pass `--to VERSION` to `status` to preview the
+plan for a specific target rather than the latest. (There is no separate
+dry-run flag.)
 
 ### Interactive vs non-interactive
 
-* No command → **interactive** menu (header shows version/host/database; options: init,
-  status, history, run, help).
+* No command → **interactive** menu. On entry it validates the migration
+  directory and the connection (`SELECT CURRENT_USER()`), failing fast with a
+  clear error if the directory is bad or it can't connect; otherwise the header
+  shows version and, under a `Connected to:` label, the host, authenticated
+  user, database, and migration directory, then the menu (init, status,
+  history, run, help). Pass `--verbose` to enable full mysql client output for
+  interactive runs.
 * A command (`init` / `status` / `history` / `run`) → **non-interactive**; never prompts,
   suitable for scripts, CI, and cron.
 
@@ -122,19 +130,29 @@ Global options (valid for all commands):
 --port PORT (-P)       MySQL port
 --user USER (-u)       MySQL user
 --login-path NAME (-L) MySQL login path
+--password[=VALUE] (-p) Bare -p prompts (no echo); --password=VALUE / -pVALUE uses VALUE
 --defaults-file=FILE        Use only this option file (replaces the default set)
 --defaults-extra-file=FILE  Add this option file to the default set
 ```
 
-`run`-only options:
+`status`/`run` options:
 
 ```text
---to VERSION|latest (-t)   Target version (default: latest)
+--to VERSION|latest (-t)   Target version (default: latest).
+                           With status, previews the plan up to that target;
+                           with run, executes up to that target.
 --verbose (-v)             Display full mysql client output
+                           (run, or interactive mode)
 ```
 
+Options may appear **before or after the command**, in any order
+(`mysqlmig -D app run` and `mysqlmig run -D app` are equivalent). `--to` is
+valid with `status` and `run`; `--verbose` is valid with `run` and with
+interactive mode (no command).
+
 Connection options (`--host`, `--port`, `--user`, `--login-path`) are passed through to the
-`mysql` client. You can also provide them through normal MySQL option files.
+`mysql` client. You can also provide them through normal MySQL option files, or
+in the `[mysqlmig]` group (see Configuration).
 
 ---
 
@@ -147,13 +165,26 @@ Connection options (`--host`, `--port`, `--user`, `--login-path`) are passed thr
 db=application
 dir=migrations
 login-path=mysqlmig
+host=db.example.com
+port=3306
+user=migrator
 ```
 
 * `db` — default target database.
 * `dir` — migration directory (literal path override; see directory resolution above).
 * `login-path` — MySQL login path used for authentication.
+* `host` / `port` / `user` — connection settings, so you can keep
+  migration-specific credentials here, separate from a general `[client]` group.
+* `password` — plaintext password (**last resort**; see Credentials below).
 
-Precedence: command line → `[mysqlmig]` configuration → built-in defaults.
+Only these keys are read from `[mysqlmig]`. Any other key in the group (for
+example a mysql-client option like `connect-timeout`) is ignored with a warning
+on stderr — put general mysql client options in `[client]`, which the client
+reads directly.
+
+Precedence for connection settings: command line → `[mysqlmig]` → the `mysql`
+client's own option files (`[client]`, etc.). So `[mysqlmig] user=migrator`
+overrides `[client] user=...`, and a CLI `--user` overrides both.
 
 `--defaults-file` and `--defaults-extra-file` control a single source of truth: `mysqlmig`
 reads its `[mysqlmig]` group from them and also passes them to the `mysql` client, so the
@@ -165,23 +196,62 @@ client's connection settings come from the same files. `--defaults-file` uses on
 mysqlmig --defaults-file=/etc/mysqlmig.cnf run
 ```
 
-Credentials are never stored or managed by `mysqlmig`; authentication is delegated to the
-`mysql` client. The recommended approach is a dedicated login path:
+The target host is independent of the login path, so the same credentials can be reused
+across servers while pointing at different hosts via `[client]` or `--host`.
+
+### Credentials
+
+Authentication is best delegated to the `mysql` client. The recommended approach is a
+dedicated login path:
 
 ```bash
 mysql_config_editor set --login-path=mysqlmig --host=db.example.com --user=mysqlmig --password
 mysqlmig run -L mysqlmig -D application
 ```
 
-The target host is independent of the login path, so the same credentials can be reused
-across servers while pointing at different hosts via `[client]` or `--host`.
+When a login path isn't available (e.g. `mysql_config_editor` isn't installed), you can
+supply the password one of these ways:
+
+* **Prompt (recommended):** bare `-p` / `--password` asks for the password once, with no
+  echo. Nothing is written to disk.
+
+  ```bash
+  mysqlmig run -D application -u migrator -p
+  ```
+
+* **On the command line:** `--password=VALUE` or `-pVALUE` (attached, matching the `mysql`
+  client; a space-separated `-p VALUE` is not treated as the password).
+
+  ```bash
+  mysqlmig run -D application -u migrator --password=secret
+  ```
+
+* **`password=` in `[mysqlmig]` (last resort):** a plaintext password in the option file.
+  Only use this when nothing better is available, and protect the file (`chmod 600`).
+
+Whenever you supply a password to mysqlmig (any of the above), it is passed to the `mysql`
+client as a `--password=` argument. This is required so it correctly **overrides** a
+password in an option file like `~/.my.cnf` — the `MYSQL_PWD` environment variable would
+be silently ignored when such a file exists. The tradeoff is the standard one: like
+`mysql --password=...`, the value is visible in `ps` for the `mysql` process's lifetime.
+If you supply **no** password, mysqlmig passes none and the client authenticates on its
+own (login path / option files).
+
+Password precedence (within mysqlmig): `-p`/`--password` (prompt or value) →
+`[mysqlmig] password`.
+
+> Security note: a plaintext `password=` at rest, and a `--password=` on the command line,
+> are both inherently insecure (readable in config files and in `ps` respectively). This
+> is the same tradeoff as the `mysql` client itself. Prefer a login path whenever you can.
 
 ---
 
 ## How it tracks state
 
 `mysqlmig` keeps history in a `schema_version` table in the target database, with a
-companion `v_schema_version` view that omits the large log column for everyday queries.
+companion `v_schema_version` view that omits the large log column for everyday queries
+The duration column is named `execution_duration` in both the table and the view;
+the `history` command shows the same value in its `DURATION` column.
 
 Each migration is recorded in two steps:
 
@@ -198,7 +268,7 @@ SELECT * FROM v_schema_version ORDER BY id;
 Full log for one migration when troubleshooting:
 
 ```sql
-SELECT version, script_name, status, execution_start, execution_time, execution_log
+SELECT version, script_name, status, execution_start, execution_duration, execution_log
 FROM schema_version
 WHERE version = 'v1.7';
 ```
@@ -218,7 +288,8 @@ migration (after confirmation in interactive mode), so running `init` first is o
   A failed migration may have partially changed the database.
 * A failed migration is recorded as `FAILED` and execution stops. It blocks all later migrations
   until it succeeds.
-* If `mysqlmig` itself is interrupted mid-migration (e.g. Ctrl-C), the record is left
+* If `mysqlmig` itself is interrupted mid-migration (e.g. Ctrl-C), it exits cleanly with a
+  short `Interrupted. Exiting.` warning (no traceback) and exit code `130`; the record is left
   `IN_PROGRESS` — the outcome is unknown. This also blocks later migrations.
 * Note: if the server aborts the running statement instead (e.g. `KILL QUERY` from another
   session), the client returns an error, so the migration is recorded `FAILED` rather than
@@ -253,8 +324,9 @@ v1.7_remove_column.sql
 ## Exit codes
 
 ```text
-0  Success (including "no pending migrations")
-1  Error (cause described in the message)
+0    Success (including "no pending migrations")
+1    Error (cause described in the message)
+130  Interrupted with Ctrl-C (SIGINT)
 ```
 
 ---
