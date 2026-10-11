@@ -46,6 +46,33 @@ def test_h_is_host_not_help():
     assert _get(ns, "host") == "db-host"
 
 
+def test_login_path_has_no_short_form():
+    # --login-path works in full form.
+    ns = _parse(["status", "--login-path", "prod"])
+    assert _get(ns, "login_path") == "prod"
+    # -L is NOT accepted (matches the mysql client, where -L is
+    # --skip-line-numbers), so argparse rejects it.
+    with pytest.raises(SystemExit):
+        _parse(["status", "-L", "prod"])
+
+
+def test_to_has_no_short_form():
+    # --to works in full form.
+    ns = _parse(["run", "--to", "v1.2"])
+    assert _get(ns, "to") == "v1.2"
+    # -t is NOT accepted (matches the mysql client, where -t is --table).
+    with pytest.raises(SystemExit):
+        _parse(["run", "-t", "v1.2"])
+
+
+def test_defaults_group_suffix_parsed():
+    ns = _parse(["status", "--defaults-group-suffix", "_db1"])
+    assert _get(ns, "defaults_group_suffix") == "_db1"
+    # Also accepts the = form, before the command.
+    ns2 = _parse(["--defaults-group-suffix=_db2", "run"])
+    assert _get(ns2, "defaults_group_suffix") == "_db2"
+
+
 # -- password option (-p / --password), pre-extracted from argv ------------
 
 def test_bare_p_is_prompt_sentinel():

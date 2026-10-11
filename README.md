@@ -129,18 +129,20 @@ Global options (valid for all commands):
 --host HOST (-h)       MySQL host
 --port PORT (-P)       MySQL port
 --user USER (-u)       MySQL user
---login-path NAME (-L) MySQL login path
+--login-path NAME      MySQL login path (no short form, like the mysql client)
 --password[=VALUE] (-p) Bare -p prompts (no echo); --password=VALUE / -pVALUE uses VALUE
 --defaults-file=FILE        Use only this option file (replaces the default set)
 --defaults-extra-file=FILE  Add this option file to the default set
+--defaults-group-suffix=SUFFIX  Also read [mysqlmig<SUFFIX>] (overrides [mysqlmig])
 ```
 
 `status`/`run` options:
 
 ```text
---to VERSION|latest (-t)   Target version (default: latest).
+--to VERSION|latest        Target version (default: latest).
                            With status, previews the plan up to that target;
                            with run, executes up to that target.
+                           (No short form: -t is --table in the mysql client.)
 --verbose (-v)             Display full mysql client output
                            (run, or interactive mode)
 ```
@@ -199,6 +201,37 @@ mysqlmig --defaults-file=/etc/mysqlmig.cnf run
 The target host is independent of the login path, so the same credentials can be reused
 across servers while pointing at different hosts via `[client]` or `--host`.
 
+#### Per-database groups with `--defaults-group-suffix`
+
+Mirroring the `mysql` client, `--defaults-group-suffix=SUFFIX` makes mysqlmig
+also read `[mysqlmig<SUFFIX>]` in addition to `[mysqlmig]`, with the suffixed
+group **overriding** the base. This is handy when you manage several databases
+with different users/passwords: keep shared settings in `[mysqlmig]` and the
+per-database differences in `[mysqlmig_db1]`, `[mysqlmig_db2]`, …
+
+```ini
+[mysqlmig]
+host=db.example.com
+
+[mysqlmig_db1]
+db=db1
+user=db1_migrator
+password=...
+
+[mysqlmig_db2]
+db=db2
+user=db2_migrator
+password=...
+```
+
+```bash
+mysqlmig --defaults-group-suffix=_db1 run   # uses db1 / db1_migrator
+mysqlmig --defaults-group-suffix=_db2 run   # uses db2 / db2_migrator
+```
+
+The suffix is also forwarded to the `mysql` client, so a matching
+`[client<SUFFIX>]` group (if you use one) applies to the connection too.
+
 ### Credentials
 
 Authentication is best delegated to the `mysql` client. The recommended approach is a
@@ -206,7 +239,7 @@ dedicated login path:
 
 ```bash
 mysql_config_editor set --login-path=mysqlmig --host=db.example.com --user=mysqlmig --password
-mysqlmig run -L mysqlmig -D application
+mysqlmig run --login-path mysqlmig -D application
 ```
 
 When a login path isn't available (e.g. `mysql_config_editor` isn't installed), you can

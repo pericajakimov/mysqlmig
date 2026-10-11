@@ -845,11 +845,14 @@ It supports:
 ```text
 --defaults-file=FILE
 --defaults-extra-file=FILE
+--defaults-group-suffix=SUFFIX
 ```
 
 `--defaults-file` specifies the option file to use instead of the normal MySQL option-file set.
 
 `--defaults-extra-file` adds an additional option file to the normal option-file processing.
+
+`--defaults-group-suffix` makes `mysqlmig` read `[mysqlmig<SUFFIX>]` in addition to `[mysqlmig]`, with the suffixed group overriding the base, mirroring the `mysql` client's handling of the same option. It is also forwarded to the `mysql` client, so a matching `[client<SUFFIX>]` group applies to the connection too. This lets a DBA keep shared settings in `[mysqlmig]` and per-database credentials in `[mysqlmig_db1]`, `[mysqlmig_db2]`, and so on, selecting one with `--defaults-group-suffix=_db1`. See §14 for the merge example.
 
 Both options are applied to a single source of truth: `mysqlmig` uses them to locate its own `[mysqlmig]` group **and** passes them through to every `mysql` client invocation so the client's connection settings (`[client]`, SSL, charset, and so on) are read from the same files. A DBA therefore controls where all configuration comes from with one flag.
 
@@ -1045,7 +1048,8 @@ These options are interpreted by `mysqlmig` itself and are not passed to `mysql`
 The following are command-scoped options, also interpreted by `mysqlmig`:
 
 ```text
---to (-t)        valid with status and run
+--to             valid with status and run (no short form; -t is --table
+                 in the mysql client)
 --verbose (-v)   valid with run, and with interactive mode (no command)
 ```
 
@@ -1060,11 +1064,12 @@ The option-file options are the exception to the three-category split: they are 
 ```text
 --defaults-file=FILE
 --defaults-extra-file=FILE
+--defaults-group-suffix=SUFFIX
 ```
 
-`mysqlmig` uses them to locate its `[mysqlmig]` group and also forwards them to every `mysql` invocation so the client reads its connection settings from the same files. See the Configuration section for the replace/augment semantics.
+`mysqlmig` uses them to locate its `[mysqlmig]` group (and, with a suffix, the `[mysqlmig<SUFFIX>]` group) and also forwards them to every `mysql` invocation so the client reads its connection settings from the same files. See the Configuration section for the replace/augment and suffix semantics.
 
-When present, these options must be forwarded as the **first** arguments on the `mysql` command line, before any connection or fixed options, because the `mysql` client requires `--defaults-file` / `--defaults-extra-file` to precede all other options.
+When present, these options must be forwarded as the **first** arguments on the `mysql` command line, before any connection or fixed options, because the `mysql` client requires `--defaults-file` / `--defaults-extra-file` / `--defaults-group-suffix` to precede all other options.
 
 ### 13.2 MySQL Connection Options
 
@@ -1074,8 +1079,11 @@ The following MySQL connection options are supported by `mysqlmig` and passed th
 --host HOST (-h)
 --port PORT (-P)
 --user USER (-u)
---login-path NAME (-L)
+--login-path NAME
 ```
+
+`--login-path` has no short form, matching the mysql client (which has none
+either and uses `-L` for `--skip-line-numbers`).
 
 The password is also a connection option. When supplied it is passed to the
 client as `--password=VALUE` (see Password Handling for why, and the `ps`
@@ -1102,7 +1110,7 @@ mysqlmig run -h db-prod.example.com -P 3306 -u migrator -D application
 results in the migration `mysql` process receiving the corresponding connection options.
 
 ```bash
-mysqlmig run -L production
+mysqlmig run --login-path production
 ```
 
 causes the migration `mysql` process to use `--login-path=production`.
@@ -1153,7 +1161,7 @@ overrides the host configured through `[client]`. The resulting values are passe
 Each migration is executed through a separate `mysql` client process. Conceptually, the invocation is:
 
 ```text
-mysql [--defaults-file / --defaults-extra-file, if supplied]
+mysql [--defaults-file / --defaults-extra-file / --defaults-group-suffix, if supplied]
       [mysqlmig connection options]
       [fixed mysqlmig options]
       < migration.sql
@@ -1177,11 +1185,36 @@ The target database is selected from:
 
 An explicit command-line value takes precedence over the configuration value. The database name is also used as the default migration directory when no `dir` is configured. `--db` / `-D` applies to all commands.
 
+### Per-Database Option Groups
+
+With `--defaults-group-suffix=SUFFIX`, `mysqlmig` reads `[mysqlmig<SUFFIX>]` in addition to `[mysqlmig]`, with the suffixed group overriding the base (the same merge the `mysql` client performs). This lets one option file hold shared defaults plus per-database overrides:
+
+```ini
+[mysqlmig]
+host=db.example.com
+
+[mysqlmig_db1]
+db=db1
+user=db1_migrator
+password=...
+
+[mysqlmig_db2]
+db=db2
+user=db2_migrator
+password=...
+```
+
+```bash
+mysqlmig --defaults-group-suffix=_db1 run   # db1 / db1_migrator, host from [mysqlmig]
+mysqlmig --defaults-group-suffix=_db2 run   # db2 / db2_migrator, host from [mysqlmig]
+```
+
+Keys present only in the base group (here `host`) carry through; keys present in the suffixed group override the base. The suffix is also forwarded to the `mysql` client, so a matching `[client<SUFFIX>]` group applies to the connection.
+
 The target migration version is supplied with `--to`, valid for both `status` and `run`:
 
 ```text
 mysqlmig run --to VERSION
-mysqlmig run -t VERSION
 mysqlmig status --to VERSION
 ```
 
@@ -1189,7 +1222,6 @@ or:
 
 ```text
 mysqlmig run --to latest
-mysqlmig run -t latest
 ```
 
 `latest` means the highest available migration version, and is the default when `--to` is omitted. `--to` is valid with `run` (where it bounds execution) and `status` (where it previews the plan up to that target); it has no meaning for `init` or `history`.
@@ -1660,7 +1692,7 @@ mysqlmig run -h db-prod.example.com
 Specify login path:
 
 ```bash
-mysqlmig run -L production
+mysqlmig run --login-path production
 ```
 
 Combine options:
@@ -1670,7 +1702,7 @@ mysqlmig run \
     -h db-prod.example.com \
     -P 3306 \
     -D application \
-    -L production \
+    --login-path production \
     --to v1.7
 ```
 
@@ -1869,16 +1901,17 @@ Global:
 --host HOST (-h)
 --port PORT (-P)
 --user USER (-u)
---login-path NAME (-L)
+--login-path NAME
 --password[=VALUE] (-p)
 --defaults-file=FILE
 --defaults-extra-file=FILE
+--defaults-group-suffix=SUFFIX
 ```
 
 `run`:
 
 ```text
---to VERSION|latest (-t)
+--to VERSION|latest
 --verbose (-v)
 ```
 

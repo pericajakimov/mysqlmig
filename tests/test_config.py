@@ -14,6 +14,7 @@ class Args:
         defaults = {
             "db": None, "dir": None, "host": None, "port": None, "user": None,
             "login_path": None, "defaults_file": None, "defaults_extra_file": None,
+            "defaults_group_suffix": None,
             "to": None, "verbose": False,
         }
         defaults.update(kw)
@@ -103,6 +104,43 @@ def test_cli_login_path_overrides_group():
     cfg = _resolve(Args(db="app", login_path="cli"),
                    group(**{"login-path": "cfg"}))
     assert cfg.connection.login_path == "cli"
+
+
+# -- defaults-group-suffix ---------------------------------------------------
+
+def test_group_suffix_passed_to_group_reader():
+    # The reader must receive --defaults-group-suffix=<suffix> in its
+    # option_file_args so my_print_defaults merges [mysqlmig<suffix>].
+    seen = {}
+
+    def reader(option_file_args):
+        seen["args"] = list(option_file_args)
+        return {"db": "app"}
+
+    _resolve_config(args=Args(db="app", defaults_group_suffix="_db1"),
+                    group_reader=reader,
+                    password_reader=lambda **kw: None)
+    assert "--defaults-group-suffix=_db1" in seen["args"]
+
+
+def test_group_suffix_passed_to_password_reader():
+    seen = {}
+
+    def pw_reader(**kw):
+        seen.update(kw)
+        return None
+
+    _resolve_config(args=Args(db="app", defaults_group_suffix="_db1"),
+                    group_reader=group(),
+                    password_reader=pw_reader)
+    assert seen.get("group_suffix") == "_db1"
+
+
+def test_group_suffix_stored_and_forwarded_to_mysql():
+    cfg = _resolve(Args(db="app", defaults_group_suffix="_db1"), group())
+    assert cfg.connection.defaults_group_suffix == "_db1"
+    # Forwarded to the mysql child so [client_db1] applies too.
+    assert "--defaults-group-suffix=_db1" in cfg.connection.option_file_args()
 
 
 # -- connection pass-through -------------------------------------------------
@@ -235,3 +273,29 @@ def test_read_password_unreadable_file_is_safe(tmp_path):
     missing = tmp_path / "nope.cnf"
     # Best-effort: a missing file must not raise.
     assert _read_mysqlmig_password(defaults_file=str(missing)) is None
+
+
+def test_read_password_suffix_group_overrides_base(tmp_path):
+    from mysqlmig import _read_mysqlmig_password
+    cnf = tmp_path / "mysqlmig.cnf"
+    cnf.write_text(
+        "[mysqlmig]\npassword=basepass\n\n[mysqlmig_db1]\npassword=db1pass\n",
+        encoding="utf-8",
+    )
+    # Without the suffix, the base group's password is used.
+    assert _read_mysqlmig_password(defaults_file=str(cnf)) == "basepass"
+    # With the suffix, [mysqlmig_db1] overrides the base.
+    assert _read_mysqlmig_password(
+        defaults_file=str(cnf), group_suffix="_db1") == "db1pass"
+
+
+def test_read_password_suffix_falls_back_to_base(tmp_path):
+    # If the suffixed group has no password, the base password still applies.
+    from mysqlmig import _read_mysqlmig_password
+    cnf = tmp_path / "mysqlmig.cnf"
+    cnf.write_text(
+        "[mysqlmig]\npassword=basepass\n\n[mysqlmig_db1]\nuser=db1user\n",
+        encoding="utf-8",
+    )
+    assert _read_mysqlmig_password(
+        defaults_file=str(cnf), group_suffix="_db1") == "basepass"

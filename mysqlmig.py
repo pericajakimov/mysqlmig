@@ -250,6 +250,7 @@ class ConnectionConfig:
         "database",
         "defaults_extra_file",
         "defaults_file",
+        "defaults_group_suffix",
         "host",
         "login_path",
         "password",
@@ -261,6 +262,7 @@ class ConnectionConfig:
         self,
         defaults_file=None,
         defaults_extra_file=None,
+        defaults_group_suffix=None,
         host=None,
         port=None,
         user=None,
@@ -270,6 +272,7 @@ class ConnectionConfig:
     ):
         self.defaults_file = defaults_file
         self.defaults_extra_file = defaults_extra_file
+        self.defaults_group_suffix = defaults_group_suffix
         self.host = host
         self.port = port
         self.user = user
@@ -284,12 +287,19 @@ class ConnectionConfig:
         self.password = password
 
     def option_file_args(self):
-        """Args that MUST appear first on the mysql command line."""
+        """Args that MUST appear first on the mysql command line.
+
+        --defaults-group-suffix is forwarded too, so the mysql client applies
+        [client<suffix>] (and any other suffixed groups it reads) for the
+        connection, consistent with how mysqlmig reads [mysqlmig<suffix>].
+        """
         args = []
         if self.defaults_file is not None:
             args.append("--defaults-file=" + self.defaults_file)
         if self.defaults_extra_file is not None:
             args.append("--defaults-extra-file=" + self.defaults_extra_file)
+        if self.defaults_group_suffix is not None:
+            args.append("--defaults-group-suffix=" + self.defaults_group_suffix)
         return args
 
     def connection_args(self):
@@ -932,14 +942,25 @@ def _mysqlmig_password_files(defaults_file, defaults_extra_file):
     return files
 
 
-def _read_mysqlmig_password(defaults_file=None, defaults_extra_file=None):
+def _read_mysqlmig_password(defaults_file=None, defaults_extra_file=None,
+                            group_suffix=None):
     """Read the [mysqlmig] password directly from the option file(s).
 
     `my_print_defaults` masks passwords, so we parse the files ourselves with
     configparser. Later files win (matching MySQL's "last value wins"). Returns
     the password string or None. Parsing errors are ignored (best-effort).
+
+    When group_suffix is set, the [mysqlmig<suffix>] group is also consulted
+    and overrides [mysqlmig], mirroring the mysql client's
+    --defaults-group-suffix handling.
     """
     import configparser
+
+    # Groups to consult, in increasing precedence (later wins). The suffixed
+    # group, if any, overrides the base group.
+    groups = ["mysqlmig"]
+    if group_suffix:
+        groups.append("mysqlmig" + group_suffix)
 
     password = None
     for path in _mysqlmig_password_files(defaults_file, defaults_extra_file):
@@ -949,8 +970,9 @@ def _read_mysqlmig_password(defaults_file=None, defaults_extra_file=None):
                 parser.read_file(handle)
         except (OSError, configparser.Error, UnicodeDecodeError):
             continue
-        if parser.has_option("mysqlmig", "password"):
-            password = parser.get("mysqlmig", "password")
+        for grp in groups:
+            if parser.has_option(grp, "password"):
+                password = parser.get(grp, "password")
     return password
 
 
@@ -1529,7 +1551,7 @@ Commands:
   run                        Execute pending migrations
 
 Status/run options:
-  -t, --to VERSION|latest    Target version (default: latest).
+      --to VERSION|latest    Target version (default: latest).
                              With status, preview the plan up to that
                              target. With run, execute up to that target.
   -v, --verbose              Show full mysql client output
@@ -1541,7 +1563,7 @@ Global options:
   -h, --host HOST            MySQL host
   -P, --port PORT            MySQL port
   -u, --user USER            MySQL user
-  -L, --login-path NAME      MySQL login path
+      --login-path NAME      MySQL login path
   -p, --password[=VALUE]     MySQL password; bare -p prompts (no echo),
                              --password=VALUE / -pVALUE uses VALUE
       --help                 Show this help
@@ -1550,6 +1572,8 @@ Global options:
                              Read only this MySQL option file
       --defaults-extra-file=FILE
                              Read this option file in addition to the defaults
+      --defaults-group-suffix=SUFFIX
+                             Also read [mysqlmig SUFFIX] (overrides [mysqlmig])
 
 Options may be given before or after the command.
 Running mysqlmig with no command opens the interactive menu.\
@@ -1801,7 +1825,10 @@ def _add_global_options(parser):
                         default=argparse.SUPPRESS)
     parser.add_argument("-u", "--user", dest="user", metavar="USER",
                         default=argparse.SUPPRESS)
-    parser.add_argument("-L", "--login-path", dest="login_path",
+    # --login-path has NO short form, matching the mysql client (which has
+    # none either, and uses -L for --skip-line-numbers). Spelling it out keeps
+    # mysqlmig aligned with the client and avoids a surprising -L meaning.
+    parser.add_argument("--login-path", dest="login_path",
                         metavar="NAME", default=argparse.SUPPRESS)
     # NOTE: -p / --password is NOT handled by argparse. argparse's optional
     # nargs='?' greedily consumes a following token (so `-p run` would eat the
@@ -1811,11 +1838,21 @@ def _add_global_options(parser):
                         metavar="FILE", default=argparse.SUPPRESS)
     parser.add_argument("--defaults-extra-file", dest="defaults_extra_file",
                         metavar="FILE", default=argparse.SUPPRESS)
+    # Mirrors the mysql client's --defaults-group-suffix: in addition to
+    # [mysqlmig] (and [client]), also read [mysqlmig<suffix>] (and
+    # [client<suffix>]), with the suffixed group overriding the base. Lets a
+    # DBA keep per-database credentials in e.g. [mysqlmig_db1].
+    parser.add_argument("--defaults-group-suffix", dest="defaults_group_suffix",
+                        metavar="SUFFIX", default=argparse.SUPPRESS)
 
 
 def _add_target_option(parser):
-    """Add --to (shared by status and run). SUPPRESS default."""
-    parser.add_argument("-t", "--to", dest="to", metavar="VERSION|latest",
+    """Add --to (shared by status and run). SUPPRESS default.
+
+    --to has NO short form: -t is --table in the mysql client, so reusing it
+    would clash with a DBA's expectations. --to is already short.
+    """
+    parser.add_argument("--to", dest="to", metavar="VERSION|latest",
                         default=argparse.SUPPRESS)
 
 
@@ -1892,13 +1929,19 @@ def _resolve_config(args, group_reader=None, prompted_password=None,
     cli_login_path = getattr(args, "login_path", None)
     cli_defaults_file = getattr(args, "defaults_file", None)
     cli_defaults_extra_file = getattr(args, "defaults_extra_file", None)
+    cli_defaults_group_suffix = getattr(args, "defaults_group_suffix", None)
 
     option_file_args = []
     if cli_defaults_file is not None:
         option_file_args.append("--defaults-file=" + cli_defaults_file)
     if cli_defaults_extra_file is not None:
         option_file_args.append("--defaults-extra-file=" + cli_defaults_extra_file)
+    if cli_defaults_group_suffix is not None:
+        option_file_args.append(
+            "--defaults-group-suffix=" + cli_defaults_group_suffix)
 
+    # With a suffix, my_print_defaults merges [mysqlmig] and [mysqlmig<suffix>]
+    # (suffixed last, so it wins via our last-value-wins dict).
     group = group_reader(option_file_args)
 
     db_from_cli = cli_db is not None
@@ -1930,11 +1973,13 @@ def _resolve_config(args, group_reader=None, prompted_password=None,
         password = password_reader(
             defaults_file=cli_defaults_file,
             defaults_extra_file=cli_defaults_extra_file,
+            group_suffix=cli_defaults_group_suffix,
         )
 
     connection = ConnectionConfig(
         defaults_file=cli_defaults_file,
         defaults_extra_file=cli_defaults_extra_file,
+        defaults_group_suffix=cli_defaults_group_suffix,
         host=host,
         port=port,
         user=user,

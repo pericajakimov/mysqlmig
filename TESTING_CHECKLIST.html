@@ -221,12 +221,13 @@ user=migrator
     <li class="item"><input type="checkbox"><label>Precedence: CLI &gt; <code>[mysqlmig]</code> &gt; client option files.</label></li>
     <li class="item"><input type="checkbox"><label>Same <code>--defaults-file</code> controls BOTH <code>[mysqlmig]</code> and the mysql client connection.</label></li>
     <li class="item"><input type="checkbox"><label>An UNSUPPORTED key in <code>[mysqlmig]</code> (e.g. add <code>connect-timeout=5</code>) prints a WARNING on stderr naming the key + the supported set, and the command still runs (not an error). Supported mysql client options belong in <code>[client]</code>.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--defaults-group-suffix=_db1</code>: with both <code>[mysqlmig]</code> and <code>[mysqlmig_db1]</code> in the file, the suffixed group's keys (db/user/password) override the base, while base-only keys (e.g. host) carry through. Different suffixes select different per-database credentials.</label></li>
   </ul>
 
   <h2>7. Connection options and host display</h2>
   <ul data-section="conn">
     <li class="item"><input type="checkbox"><label><code>status -D demo -h 127.0.0.1 -P 3306 -u &lt;user&gt;</code> connects.</label></li>
-    <li class="item"><input type="checkbox"><label><code>-L &lt;login-path&gt;</code> uses a configured login path.</label></li>
+    <li class="item"><input type="checkbox"><label><code>--login-path &lt;name&gt;</code> uses a configured login path (no short form; <code>-L</code> is NOT accepted, matching the mysql client where <code>-L</code> is --skip-line-numbers).</label></li>
     <li class="item"><input type="checkbox"><label>Bad host → clear connection error (exit 1), no crash.</label></li>
     <li class="item"><input type="checkbox"><label>Interactive "Host:" shows <code>--host</code> value, else option-file host, else <code>localhost</code>.</label></li>
     <li class="item"><input type="checkbox"><label>Host display is NEVER the server's <code>@@hostname</code>.</label></li>
