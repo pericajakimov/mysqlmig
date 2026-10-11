@@ -147,15 +147,15 @@
     <li class="item"><input type="checkbox"><label>Fresh db: <code>status</code> reports "not initialized", exit 1.</label></li>
     <li class="item"><input type="checkbox"><label>After migrations: shows Database, Current, Target, Latest, Pending.</label></li>
     <li class="item"><input type="checkbox"><label>Labels Current/Target/Latest are right-aligned so their colons line up under <code>Database:</code>.</label></li>
-    <li class="item"><input type="checkbox"><label>Version values are bold, each in its own color: Current yellow, Target light blue, Latest green. (<code>(none)</code> is plain.)</label></li>
+    <li class="item"><input type="checkbox"><label>Version values are bold, each in its own color: Current cyan (same as History VERSION), Target green, Latest yellow. (<code>(none)</code> is plain.)</label></li>
     <li class="item"><input type="checkbox"><label><code>status --to v1.1</code> previews the plan for that target: Target shows v1.1 and Pending is limited to migrations up to v1.1 (changes nothing).</label></li>
     <li class="item"><input type="checkbox"><label><code>status --to v9.9</code> (non-existent) and a target below current are rejected, same as <code>run</code>.</label></li>
-    <li class="item"><input type="checkbox"><label>Colors: Database bold white; Current bold yellow; Target bold light blue; Latest bold green; pending scripts bright blue.</label></li>
+    <li class="item"><input type="checkbox"><label>Colors: Database bold white; Current bold cyan; Target bold green; Latest bold yellow; pending scripts bright blue.</label></li>
   </ul>
   <h3>run</h3>
   <ul data-section="run">
     <li class="item"><input type="checkbox"><label>Fresh db: <code>run -D demo</code> creates metadata, applies all in order, SUCCESS each, "Migration complete".</label></li>
-    <li class="item"><input type="checkbox"><label>On completion: <code>Migration complete.</code> is bold green, then a blank line, then <code>Current version: vX</code> with the label bold and the version bold yellow (same as Current in status).</label></li>
+    <li class="item"><input type="checkbox"><label>On completion: <code>Migration complete.</code> is bold green, then a blank line, then <code>Current version: vX</code> with the label bold and the version bold cyan (same as Current in status).</label></li>
     <li class="item"><input type="checkbox"><label>Re-run when done: prints the FULL status (Database/Current/Target/Latest) followed by "No pending migrations", exit 0 — identical to <code>status</code>, not a partial summary.</label></li>
     <li class="item"><input type="checkbox"><label><code>Executing: &lt;script&gt;</code> header is bold and identical with and without <code>--verbose</code>; <code>--verbose</code> only adds the separator rule + captured client log. Output is the same in interactive and non-interactive runs.</label></li>
     <li class="item"><input type="checkbox"><label><code>run -D demo --to v1.1</code> applies only up to v1.1.</label></li>

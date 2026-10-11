@@ -716,7 +716,7 @@ text and then redisplays the menu.
 
 Interactive `run` may ask for confirmation before executing migrations and before retrying a blocking migration (`FAILED` or `IN_PROGRESS`).
 
-Output uses color where useful. In the status block, each version value is bold in its own color so the three are easy to tell apart: **Current** bold yellow, **Target** bold light blue, **Latest** bold green; the database name is bold white, pending migrations are shown in the script color. On a successful run, `Migration complete.` is bold green and the final `Current version:` value is bold yellow (matching Current). Color is a presentation detail only: it is disabled automatically when stdout is not a TTY, independent of execution mode.
+Output uses color where useful. In the status block, each version value is bold in its own color so the three are easy to tell apart: **Current** bold cyan (matching the History `VERSION` column), **Target** bold green, **Latest** bold yellow; the database name is bold white, pending migrations are shown in the script color. On a successful run, `Migration complete.` is bold green and the final `Current version:` value is bold cyan (matching Current). Color is a presentation detail only: it is disabled automatically when stdout is not a TTY, independent of execution mode.
 
 ### Non-Interactive
 

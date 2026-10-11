@@ -1094,15 +1094,16 @@ class Color:
 
     # Status version lines use a distinct bold color each so the three values
     # are easy to tell apart at a glance:
-    #   current -> bold yellow, target -> bold light blue, latest -> bold green
+    #   current -> bold cyan (matches the History VERSION column),
+    #   target  -> bold green, latest -> bold yellow
     def current_version(self, text):
-        return self._wrap(str(text), "bold", "yellow")
+        return self._wrap(str(text), "bold", "cyan")
 
     def target_version(self, text):
-        return self._wrap(str(text), "bold", "bright_blue")
+        return self._wrap(str(text), "bold", "green")
 
     def latest_version(self, text):
-        return self._wrap(str(text), "bold", "green")
+        return self._wrap(str(text), "bold", "yellow")
 
     def script(self, text):
         return self._wrap(str(text), "bright_blue")
