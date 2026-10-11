@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """mysqlmig - a simple, deterministic MySQL schema migration executor for DBAs.
 
 Single-file tool, Python 3.12+, standard library only. SQL execution is
@@ -14,7 +14,7 @@ import subprocess
 import sys
 from typing import ClassVar
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 # Sentinel marking "prompt for the password" (bare -p / --password with no
 # value), distinct from an explicitly supplied --password=VALUE.

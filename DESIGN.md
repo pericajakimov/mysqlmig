@@ -670,7 +670,7 @@ opens an interactive menu.
 Example:
 
 ```text
-MySQL Migration Tool v0.2.0
+MySQL Migration Tool v1.0.0
 
 Connected to:
             Host: db-prod.example.com

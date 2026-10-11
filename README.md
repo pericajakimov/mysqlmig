@@ -23,6 +23,28 @@ For the full rationale and detailed behavior, see [DESIGN.md](DESIGN.md).
 
 ---
 
+## Installation
+
+`mysqlmig` is a single self-contained script. Install it by copying the file onto
+`PATH` as an executable named `mysqlmig` (drop the `.py`):
+
+```bash
+sudo install -m 0755 mysqlmig.py /usr/local/bin/mysqlmig
+mysqlmig --version
+```
+
+`/usr/local/bin` is the conventional location for locally managed tools and is on
+`PATH` by default; avoid `/usr/bin`, which belongs to the system package manager.
+The script's shebang is `#!/usr/bin/python3` (the system interpreter on the
+supported Ubuntu 24.04 / Python 3.12 floor); adjust it if your `python3` lives
+elsewhere.
+
+For a fleet, deploy with your configuration manager — for example an Ansible
+`copy`/`template` task to `/usr/local/bin/mysqlmig` (mode `0755`, owner `root`),
+followed by a `mysqlmig --version` smoke check.
+
+---
+
 ## Migration files
 
 Migrations live in a directory and are named:
