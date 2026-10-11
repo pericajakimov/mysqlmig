@@ -386,6 +386,25 @@ v1.7_remove_column.sql
 
 ---
 
+## Documentation
+
+This README is the quick-start overview. The repository also includes:
+
+* **[DESIGN.md](DESIGN.md)** — the full design: data model, state and concurrency
+  handling, command behavior, configuration and credential precedence, and the
+  rationale behind the decisions. Read this to understand *why* `mysqlmig`
+  behaves the way it does, or before contributing changes.
+* **[CHANGELOG.md](CHANGELOG.md)** — notable changes per release, following
+  [Keep a Changelog](https://keepachangelog.com/) and
+  [Semantic Versioning](https://semver.org/). Check here to see what changed
+  between versions.
+* **[TESTING_CHECKLIST.html](TESTING_CHECKLIST.html)** — a clickable manual-QA
+  checklist for exercising the tool against a real MySQL server (progress saved
+  in your browser). Open it locally in a browser; useful when validating a build
+  or a new environment before trusting it with production schemas.
+
+---
+
 ## License
 
 See [LICENSE](LICENSE).
