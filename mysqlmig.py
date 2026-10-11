@@ -14,6 +14,23 @@ import subprocess
 import sys
 from typing import ClassVar
 
+# Fail fast and clearly on an interpreter older than the 3.12 floor, rather
+# than later with a confusing error. This module intentionally avoids syntax
+# newer than 3.12 so this check runs even under an older python3 (e.g. when the
+# shebang's interpreter is not the expected one).
+#
+# The inline suppression below is required: ruff's target-version is py312, so
+# it assumes this block is dead code (rule UP036). It is NOT dead code -- the
+# shebang can resolve to an older interpreter at runtime (wrong python3 on
+# PATH, a stale system python), and this guard turns that into a clear message
+# instead of a confusing failure. Keep both the guard and the suppression.
+if sys.version_info < (3, 12):  # noqa: UP036
+    sys.exit(
+        "mysqlmig requires Python 3.12 or newer, but is running under "
+        "{}.{}.{}. Install it under a 3.12+ interpreter (or adjust the "
+        "script's shebang).".format(*sys.version_info[:3])
+    )
+
 __version__ = "1.0.0"
 
 # Sentinel marking "prompt for the password" (bare -p / --password with no

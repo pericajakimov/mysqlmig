@@ -26,22 +26,77 @@ For the full rationale and detailed behavior, see [DESIGN.md](DESIGN.md).
 ## Installation
 
 `mysqlmig` is a single self-contained script. Install it by copying the file onto
-`PATH` as an executable named `mysqlmig` (drop the `.py`):
+`PATH` as an executable named `mysqlmig` (drop the `.py`). `/usr/local/bin` is the
+conventional location for locally managed tools and is on `PATH` by default;
+avoid `/usr/bin`, which belongs to the system package manager.
+
+The script's shebang is `#!/usr/bin/python3` — the system interpreter on the
+primary deploy target (Ubuntu 24.04 / Python 3.12).
+
+### Linux
 
 ```bash
 sudo install -m 0755 mysqlmig.py /usr/local/bin/mysqlmig
 mysqlmig --version
 ```
 
-`/usr/local/bin` is the conventional location for locally managed tools and is on
-`PATH` by default; avoid `/usr/bin`, which belongs to the system package manager.
-The script's shebang is `#!/usr/bin/python3` (the system interpreter on the
-supported Ubuntu 24.04 / Python 3.12 floor); adjust it if your `python3` lives
-elsewhere.
-
 For a fleet, deploy with your configuration manager — for example an Ansible
 `copy`/`template` task to `/usr/local/bin/mysqlmig` (mode `0755`, owner `root`),
 followed by a `mysqlmig --version` smoke check.
+
+### macOS
+
+The copy step is the same:
+
+```bash
+sudo install -m 0755 mysqlmig.py /usr/local/bin/mysqlmig
+mysqlmig --version
+```
+
+One caveat: the shebang `#!/usr/bin/python3` points at Apple's Command Line Tools
+Python, which may be missing or older than 3.12. If you use Homebrew's Python
+(the common case), either update the shebang to your interpreter, for example:
+
+```bash
+# Apple Silicon
+sed -i '' '1s|.*|#!/opt/homebrew/bin/python3|' /usr/local/bin/mysqlmig
+# Intel
+sed -i '' '1s|.*|#!/usr/local/bin/python3|' /usr/local/bin/mysqlmig
+```
+
+or run it through your interpreter explicitly (`python3 mysqlmig.py ...`). Confirm
+with `python3 --version` that you are on 3.12 or newer. If you prefer a
+PATH-based lookup over a hard-coded path, change the shebang to
+`#!/usr/bin/env python3`.
+
+### Windows (best-effort)
+
+Windows is not the target platform, but the tool runs there with no code changes
+if you need it. The shebang is ignored on Windows, so invoke the script through
+the interpreter:
+
+```bat
+py -3 mysqlmig.py --version
+```
+
+To call it as a short command, create a `mysqlmig.bat` wrapper on your `PATH`:
+
+```bat
+@echo off
+py -3 "C:\path\to\mysqlmig.py" %*
+```
+
+Requirements and caveats:
+
+* Python 3.12+ (`py -3 --version`) and the MySQL/MariaDB client (`mysql.exe`,
+  and `my_print_defaults.exe` for `[mysqlmig]` option-group support) must be on
+  `PATH`.
+* Option files resolve from the Windows profile (`%USERPROFILE%\.my.cnf`).
+* Color: Windows Terminal and PowerShell 7 render the ANSI colors; the legacy
+  `cmd.exe` console may not. Set `NO_COLOR=1` for plain output if needed.
+
+Everything else (status/history/run, `--to`, `--defaults-file`,
+`--defaults-group-suffix`, password handling) behaves the same as on Linux.
 
 ---
 
