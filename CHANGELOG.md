@@ -87,4 +87,4 @@ command-line client.
 - `0` success (including "no pending migrations"), `1` error, `130` interrupted
   (SIGINT).
 
-[1.0.0]: https://keepachangelog.com/
+[1.0.0]: https://github.com/pericajakimov/mysqlmig/releases/tag/v1.0.0
